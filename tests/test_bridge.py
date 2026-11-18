@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import tempfile
@@ -219,13 +220,85 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(api.call_args.args[2]["model"], "grok-imagine-image-2.0")
             self.assertEqual(self.action(client, image, "generate").status_code, 409)
 
-            video = self.submit(client, prompt="Generate video")
+            video = self.submit(client, prompt="Make a short clip")
             self.assertEqual(self.action(client, video, "generate").status_code, 202)
-            self.assertEqual(api.call_args.args[2]["prompt"], "Generate video")
+            self.assertEqual(api.call_args.args[2]["prompt"], "Make a short clip")
             self.assertEqual(self.refresh(client, video)["progress"], 42)
             result = self.refresh(client, video)
             self.assertEqual(result["status"], "done")
             self.assertEqual(result["media_url"], "https://media.example/video.mp4")
+
+    def test_explicit_media_request_is_routed_locally_and_base64_image_is_stored(self):
+        jpeg = b"\xff\xd8\xff\xe0 sample"
+        with self.client(live=True) as client, patch("providers.request_json") as api:
+            api.return_value = {"data": [{"b64_json": base64.b64encode(jpeg).decode()}]}
+            image = self.submit(client, prompt="Нарисуй картинку лимона")
+            self.assertEqual(self.get(client, image)["route"], "image")
+            api.assert_not_called()
+            self.assertEqual(self.action(client, image, "generate").status_code, 202)
+            api.assert_called_once()
+            self.assertEqual(api.call_args.args[2]["response_format"], "b64_json")
+            url = self.get(client, image)["media_url"]
+            self.assertEqual(url, f"/api/jobs/{image.json()['id']}/media")
+            media = client.get(url)
+            self.assertEqual((media.content, media.headers["content-type"]), (jpeg, "image/jpeg"))
+
+            api.return_value = {"data": [{"b64_json": base64.b64encode(b"<html>").decode()}]}
+            bad = self.submit(client, prompt="Нарисуй картинку лимона")
+            self.action(client, bad, "generate")
+            self.assertEqual(self.get(client, bad)["status"], "failed")
+
+            self.assertEqual(client.post("/api/jobs/clear", json={}, headers=WRITE).json(), {"cleared": 2})
+            self.assertEqual(client.get(url).status_code, 404)
+            self.assertFalse(list((self.path.parent / "media").iterdir()))
+
+    def test_clear_hides_finished_jobs_but_keeps_active_ones_and_usage(self):
+        with self.client(live=True) as client, patch("providers.request_json") as api:
+            api.side_effect = [
+                {**route("answer", "Answer"), "usage": {"prompt_tokens": 7, "completion_tokens": 3}},
+                route("implement"), {"session_id": "devin-session", "status": "running", "acus_consumed": 1.5},
+            ]
+            done = self.submit(client, prompt="Compare CSV parsers")
+            active = self.submit(client, prompt="Fix the import", repo="test/repo")
+            self.assertEqual(self.get(client, active)["status"], "running")
+            self.assertEqual(client.post("/api/jobs/clear", json={}).status_code, 403)
+            self.assertEqual(client.post("/api/jobs/clear", json={}, headers=WRITE).json(), {"cleared": 1})
+            self.assertEqual(api.call_count, 3)
+            self.assertEqual([job["id"] for job in client.get("/api/jobs").json()], [active.json()["id"]])
+            self.assertEqual(client.get(f"/api/jobs/{done.json()['id']}").status_code, 404)
+            overview = client.get("/api/overview").json()
+            self.assertEqual(overview["jobs"]["total"], 1)
+            self.assertEqual(overview["grok"]["total_tokens"], 10)
+            self.assertEqual(overview["devin"]["acu"], 1.5)
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT prompt FROM jobs WHERE hidden").fetchall(), [("",)])
+
+    def test_settings_need_admin_password_and_never_return_keys(self):
+        with self.client(live=True) as client:
+            self.assertEqual(client.get("/settings").status_code, 200)
+            self.assertEqual(client.get("/api/settings").json()["keys"], {"antig": "environment", "xai": "missing"})
+            locked = client.post("/api/settings", json={"provider": "xai"}, headers=WRITE)
+            self.assertEqual(locked.status_code, 403)
+        secret = "xai-" + "k" * 24
+        settings = Settings(self.path, antig_key="mock-antig", admin_key="open-sesame")
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("providers.request_json") as api:
+            self.assertEqual(client.get("/api/settings").status_code, 401)
+            auth = ("bridge", "open-sesame")
+            self.assertEqual(client.get("/", auth=("bridge", "wrong")).status_code, 401)
+            wrong = client.post("/api/settings", json={"provider": "xai", "key": "ag_" + "k" * 24}, headers=WRITE, auth=auth)
+            self.assertEqual(wrong.status_code, 422)
+            self.assertNotIn("k" * 24, wrong.text)
+            saved = client.post("/api/settings", json={"provider": "xai", "key": secret}, headers=WRITE, auth=auth)
+            self.assertEqual(saved.json()["keys"]["xai"], "runtime")
+            self.assertEqual(saved.json()["provider"], "xai")
+            self.assertNotIn(secret, saved.text + client.get("/api/config", auth=auth).text)
+            api.return_value = route("answer", f"Leaked {secret}")
+            run = client.post("/api/jobs", json={"prompt": f"Explain {secret}"}, headers=WRITE, auth=auth)
+            self.assertEqual(api.call_args.args[:2], ("https://api.x.ai/v1/chat/completions", secret))
+            self.assertNotIn(secret, client.get(f"/api/jobs/{run.json()['id']}", auth=auth).text)
+            reset = client.post("/api/settings", json={"provider": "xai", "reset": True}, headers=WRITE, auth=auth)
+            self.assertEqual(reset.json()["keys"]["xai"], "missing")
+            self.assertEqual(client.post("/api/jobs", json={"prompt": "Hi"}, headers=WRITE, auth=auth).status_code, 503)
 
     def test_background_progress_without_browser_refresh(self):
         polled = Event()

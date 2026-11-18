@@ -29,6 +29,8 @@ ID_PATTERN = r"(?:[\w.-]+/[\w.-]+/[\w.-]+|[\w.-]+\.[\w.-]+/[\w.-]+)"
 SkillID = Annotated[str, StringConstraints(pattern=f"^{ID_PATTERN}$", max_length=180)]
 MAX_TASK_SKILLS = 4
 COOKIE = "bridge_skill_library"
+CUSTOM_SOURCE = "my/skills"
+MAX_CUSTOM = 20
 PAGE_SIZE = 36
 SEARCH_LIMIT = 200
 TOPICS = ("coding", "frontend design", "python", "database", "documentation")
@@ -111,6 +113,8 @@ RECIPES: dict[str, dict[str, str]] = {
 }
 
 RECOMMENDED = (
+    "bridge/agent-skills/studio-design",
+    "bridge/agent-skills/media-for-design",
     "bridge/agent-skills/plan-and-implement",
     "bridge/agent-skills/interface-ux",
     "bridge/agent-skills/design-system",
@@ -175,7 +179,7 @@ def search_directory(query: str, _bucket: int) -> tuple[dict[str, Any], ...]:
         card(row["id"], name=row["name"][:150] if isinstance(row.get("name"), str) else "",
              installs=row["installs"] if type(row.get("installs")) is int and row["installs"] >= 0 else None)
         for row in rows[:SEARCH_LIMIT] if isinstance(row, dict) and valid_id(row.get("id"))
-        and not row["id"].startswith("bridge/agent-skills/")
+        and not row["id"].startswith(("bridge/agent-skills/", CUSTOM_SOURCE + "/"))
     )
 
 
@@ -295,6 +299,17 @@ class Review(BaseModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
 
 
+Instruction = Annotated[str, StringConstraints(strip_whitespace=True, min_length=20, max_length=1500)]
+
+
+class CustomSkill(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=80)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] = ""
+    grok: Instruction
+    devin: Instruction
+
+
 class Skills:
     def __init__(self, connect: Callable[[], sqlite3.Connection], *, public: bool) -> None:
         self.connect = connect
@@ -310,6 +325,10 @@ class Skills:
                 CREATE TABLE IF NOT EXISTS skill_reviews (
                     skill_id TEXT NOT NULL, browser TEXT NOT NULL, stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5),
                     text TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (skill_id, browser)
+                );
+                CREATE TABLE IF NOT EXISTS custom_skills (
+                    skill_id TEXT PRIMARY KEY, browser TEXT NOT NULL, title TEXT NOT NULL,
+                    grok TEXT NOT NULL, devin TEXT NOT NULL
                 );
             """)
 
@@ -328,16 +347,33 @@ class Skills:
         if not skill_ids:
             return []
         installed = self.installed(browser)
+        recipes = {**self.custom(browser), **RECIPES}
         if (len(skill_ids) != len(set(skill_ids))
-                or any(skill_id not in installed or skill_id not in RECIPES for skill_id in skill_ids)):
-            raise HTTPException(422, "Выбери разные установленные скиллы из раздела «Готовые для агентов».")
-        return [{"id": skill_id, **RECIPES[skill_id]} for skill_id in skill_ids]
+                or any(skill_id not in installed or skill_id not in recipes for skill_id in skill_ids)):
+            raise HTTPException(422, "Выбери разные установленные скиллы: готовые для агентов или свои.")
+        return [{"id": skill_id, **recipes[skill_id]} for skill_id in skill_ids]
+
+    def custom(self, browser: str) -> dict[str, dict[str, str]]:
+        with closing(self.connect()) as conn:
+            return {row["skill_id"]: {key: row[key] for key in ("title", "grok", "devin")} for row in conn.execute(
+                "SELECT skill_id, title, grok, devin FROM custom_skills WHERE browser = ?", (browser,))}
+
+    @staticmethod
+    def ensure_browser(request: APIRequest, response: Response) -> str:
+        browser = Skills.browser(request)
+        if not browser:
+            browser = secrets.token_hex(32)
+            response.set_cookie(COOKIE, browser, max_age=31_536_000, httponly=True, samesite="lax",
+                                secure=request.url.scheme == "https")
+        return browser
 
     def details(self, skill_id: str) -> dict[str, Any]:
         if not valid_id(skill_id):
             raise HTTPException(404, "Скилл не найден.")
         if skill_id in RECIPES:
             return card(skill_id)
+        if skill_id.startswith(CUSTOM_SOURCE + "/"):
+            raise HTTPException(404, "Этот скилл доступен только в библиотеке автора.")
         if not self.public:
             raise HTTPException(404, "Этот скилл недоступен в офлайн-демо.")
         try:
@@ -453,16 +489,12 @@ class Skills:
                                    (skill_id, browser)).fetchone()
             return {**self.decorate([item], library)[0], "reviews": [dict(row) for row in rows],
                     "my_review": dict(own) if own else None,
-                    "recipe": {agent: RECIPES[skill_id][agent] for agent in ("grok", "devin")}
-                    if skill_id in RECIPES else None}
+                    "recipe": {agent: recipe[agent] for agent in ("grok", "devin")}
+                    if (recipe := RECIPES.get(skill_id) or self.custom(browser).get(skill_id)) else None}
 
         @router.post("/library")
         def set_library(change: Selection, request: APIRequest, response: Response) -> dict[str, bool]:
-            browser = self.browser(request)
-            if not browser:
-                browser = secrets.token_hex(32)
-                response.set_cookie(COOKIE, browser, max_age=31_536_000, httponly=True, samesite="lax",
-                                    secure=request.url.scheme == "https")
+            browser = self.ensure_browser(request, response)
             library = self.installed(browser)
             if change.installed and change.skill_id not in library:
                 item = self.details(change.skill_id)
@@ -477,7 +509,32 @@ class Skills:
                 with closing(self.connect()) as conn, conn:
                     conn.execute("DELETE FROM skill_library WHERE browser = ? AND skill_id = ?",
                                  (browser, change.skill_id))
+                    # Removing your own skill deletes its instructions and reviews, not just the bookmark.
+                    if conn.execute("DELETE FROM custom_skills WHERE browser = ? AND skill_id = ?",
+                                    (browser, change.skill_id)).rowcount:
+                        conn.execute("DELETE FROM skill_reviews WHERE skill_id = ?", (change.skill_id,))
             return {"installed": change.installed}
+
+        @router.post("/custom", status_code=201)
+        def create_custom(skill: CustomSkill, request: APIRequest, response: Response) -> dict[str, str]:
+            browser = self.ensure_browser(request, response)
+            skill_id = f"{CUSTOM_SOURCE}/{secrets.token_hex(8)}"
+            title = redact(skill.title)
+            metadata = {
+                "id": skill_id, "name": title, "source": CUSTOM_SOURCE, "installs": None, "url": None,
+                "description": redact(skill.description), "recipe_title": title, "recipe_group": "custom",
+            }
+            with closing(self.connect()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                own = conn.execute("SELECT COUNT(*) FROM custom_skills WHERE browser = ?", (browser,)).fetchone()[0]
+                saved = conn.execute("SELECT COUNT(*) FROM skill_library WHERE browser = ?", (browser,)).fetchone()[0]
+                if own >= MAX_CUSTOM or saved >= 100:
+                    raise HTTPException(409, f"Можно создать до {MAX_CUSTOM} своих скиллов и хранить до 100 в библиотеке.")
+                conn.execute("INSERT INTO custom_skills VALUES (?, ?, ?, ?, ?)",
+                             (skill_id, browser, title, redact(skill.grok), redact(skill.devin)))
+                conn.execute("INSERT INTO skill_library VALUES (?, ?, ?)",
+                             (browser, skill_id, json.dumps(metadata, ensure_ascii=False)))
+            return {"id": skill_id}
 
         @router.post("/review")
         def leave_review(review: Review, request: APIRequest) -> dict[str, bool]:

@@ -8,3 +8,6 @@
 - `skills_market.py`: public skill metadata, browser libraries, reviews and agent instruction packs.
 - `static/`: task form, history and session editor.
 - `tests/`: mocked workflows and demo behavior.
+- Settings and cleanup: `/api/settings` (runtime Grok keys, needs `BRIDGE_ADMIN_KEY`), `/api/jobs/clear` (hides finished jobs, keeps usage) in `app.py`; UI in `static/settings.html`, `static/settings.js`.
+- Custom skills: `/api/skills/custom` in `skills_market.py`; built-in Grok + Devin recipes in `pair_skills.py`.
+- Token economy: local media routing (`explicit_media`) and budget rules for the router and Devin handoff in `orchestration.py`.

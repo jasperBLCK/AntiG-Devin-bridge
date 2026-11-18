@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#10131d">
+  <title>Настройки · Мост</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+  <script src="/static/settings.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <aside class="sidebar" aria-label="Навигация кабинета">
+    <a href="/" class="brand"><img src="/static/icon.svg" width="34" height="34" alt=""><span><strong>Мост</strong><small>AntiG × Devin</small></span></a>
+    <nav class="dashboard-nav" aria-label="Разделы">
+      <span class="nav-caption">РАБОЧАЯ СРЕДА</span>
+      <a href="/"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layout"/></svg>Обзор</a>
+      <a href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+      <a href="/sessions"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
+      <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
+      <a href="/settings" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Настройки</a>
+    </nav>
+    <div class="sidebar-foot"><span class="nav-caption">ОРКЕСТРАЦИЯ</span><strong>Grok + Devin</strong><span>Одна задача, два агента</span></div>
+  </aside>
+  <div class="dashboard">
+  <header class="topbar">
+    <div class="top-inner">
+      <div class="top-context"><span>Рабочая среда</span><span class="divider">/</span><strong>Настройки</strong></div>
+      <span class="environment" id="environment">Подключение…</span>
+    </div>
+  </header>
+  <main id="main">
+    <header class="page-heading">
+      <div><h1>Настройки</h1><p>Ключи Grok хранятся только на сервере. Панель показывает их статус, но не значения.</p></div>
+    </header>
+    <noscript>Включи JavaScript, чтобы изменить настройки.</noscript>
+    <div class="settings-layout">
+      <section class="panel settings-card" aria-labelledby="keys-title">
+        <div class="panel-header"><h2 id="keys-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Ключи Grok</h2></div>
+        <form id="settings-form">
+          <fieldset class="provider-choice">
+            <legend>Через какой API работает Grok</legend>
+            <label class="provider-option"><input type="radio" name="provider" value="antig" checked>
+              <span><strong>AntiG</strong><small class="mono">grok.antig.ru · ключ ag_…</small></span>
+              <span class="status" id="key-antig">—</span></label>
+            <label class="provider-option"><input type="radio" name="provider" value="xai">
+              <span><strong>Grok CLI · xAI</strong><small class="mono">api.x.ai · ключ xai-…</small></span>
+              <span class="status" id="key-xai">—</span></label>
+          </fieldset>
+          <label for="api-key">Новый ключ для выбранного API</label>
+          <input id="api-key" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Оставь пустым, чтобы только сменить API">
+          <p class="muted">Ключ действует до перезапуска сервера. Чтобы сохранить его надолго, задай ANTIG_API_KEY или XAI_API_KEY в окружении.</p>
+          <div class="form-actions">
+            <button type="submit" id="save-settings" class="primary" disabled>Сохранить</button>
+            <button type="button" id="reset-key" class="quiet" disabled>Сбросить введённый ключ</button>
+          </div>
+          <p id="settings-note" class="muted" role="status"></p>
+          <p id="settings-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+      <section class="panel settings-card" aria-labelledby="clear-title">
+        <div class="panel-header"><h2 id="clear-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>История</h2></div>
+        <div class="settings-body">
+          <p>Убирает из панели завершённые задачи, ошибки и неподтверждённые медиа вместе с их текстами и картинками.</p>
+          <p class="muted">Задачи в работе и на паузе остаются. Сессии Devin и PR не удаляются, учёт токенов и ACU сохраняется.</p>
+          <button type="button" id="clear-sessions" class="quiet danger">Очистить завершённые сессии</button>
+          <p id="clear-note" class="muted" role="status"></p>
+        </div>
+      </section>
+    </div>
+
+    <footer><span>AntiG × Devin</span><span>Автоматическое распределение и журнал работы</span></footer>
+  </main>
+  </div>
+</body>
+</html>

@@ -198,6 +198,10 @@ async function loadOverview() {
       "Сессий с замером: " + amount(devin.measured) + " из " + amount(devin.sessions) + ".";
     $("acu-default").textContent = amount(limits.default_acu) + " ACU";
     $("acu-range").textContent = "1–" + amount(limits.max_acu) + " ACU";
+    const keys = await api("/api/settings");
+    const names = { antig: "AntiG", xai: "Grok CLI · xAI" };
+    $("settings-summary").textContent = demo ? "Демо: ключи не используются" :
+      "Grok через " + names[keys.provider] + " · ключ " + (keys.keys[keys.provider] === "missing" ? "не задан" : "задан");
     message("overview-error", "");
   } catch (error) {
     message("overview-error", error.message);
@@ -476,6 +480,26 @@ async function loadTaskSkills() {
 }
 
 $("reload")?.addEventListener("click", () => void load());
+$("clear-sessions")?.addEventListener("click", async (event) => {
+  if (!window.confirm("Убрать из панели завершённые задачи, ошибки и неподтверждённые медиа? " +
+    "Задачи в работе, сессии Devin и учёт расхода останутся.")) return;
+  const button = event.currentTarget;
+  const note = $("clear-note");
+  button.disabled = true;
+  try {
+    const { cleared } = await api("/api/jobs/clear", {});
+    if (note) note.textContent = cleared ? "Убрано задач: " + cleared + "." : "Завершённых задач нет.";
+    if ($("history-list")) {
+      state.selected = state.detail = null;
+      await load();
+    }
+  } catch (error) {
+    if (note) note.textContent = error.message;
+    else message("history-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("history-search")?.addEventListener("input", showHistory);
 for (const button of document.querySelectorAll("[data-history-filter]")) {
   button.addEventListener("click", () => filterHistory(button.dataset.historyFilter));
@@ -526,9 +550,11 @@ async function init() {
     const environment = $("environment");
     environment.dataset.state = cfg.demo ? "demo" : cfg.antig && cfg.devin ? "connected" : "partial";
     environment.textContent = cfg.demo ? "Демо · без вызовов агентов" :
-      "AntiG: " + (cfg.antig ? "ключ задан" : "нет ключа") + " · Devin: " + (cfg.devin ? "ключ задан" : "нет ключа");
+      "Grok: " + (cfg.grok ? "ключ задан" : "нет ключа") + " · Devin: " + (cfg.devin ? "ключ задан" : "нет ключа");
     if (form) {
       updateForm();
+    } else if ($("settings-form")) {
+      // settings.js owns this page.
     } else if ($("history-list")) {
       const filter = params.get("filter");
       filterHistory(Object.hasOwn(groups, filter) ? filter : "all");

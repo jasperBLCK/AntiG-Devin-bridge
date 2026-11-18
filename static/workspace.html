@@ -84,6 +84,7 @@
             <button type="button" data-market-tab="recommended" aria-pressed="false">Топ Grok + Devin</button>
             <button type="button" data-market-tab="ready" aria-pressed="false">Готовые для агентов</button>
             <button type="button" data-market-tab="library" aria-pressed="false">Моя библиотека</button>
+            <button type="button" id="custom-open" class="market-primary">+ Свой скилл</button>
           </nav>
           <label class="market-search"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg>
             <input id="market-query" type="search" maxlength="100" aria-label="Поиск скиллов" placeholder="Название или тема: React, Python, design…">
@@ -168,6 +169,25 @@
         <ul id="skill-review-list"></ul>
       </section>
     </div>
+  </dialog>
+  <dialog id="custom-dialog" class="skill-dialog" aria-labelledby="custom-title">
+    <form id="custom-form" class="skill-dialog-inner custom-form">
+      <header class="skill-detail-header">
+        <div><p class="market-kicker">СВОЙ СКИЛЛ ДЛЯ GROK + DEVIN</p><h2 id="custom-title">Новый скилл</h2></div>
+        <button id="custom-close" class="icon-button" type="button" aria-label="Закрыть"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#close"/></svg></button>
+      </header>
+      <p class="dim">Раздели работу по сильным сторонам. Grok планирует, оценивает дизайн и готовит запросы для фото и видео. Devin работает в репозитории: пишет код, запускает тесты, встраивает готовые файлы.</p>
+      <label>Название <input id="custom-name" required minlength="3" maxlength="80" placeholder="Например: Лендинг с видео-героем"></label>
+      <label>Коротко о скилле <input id="custom-description" maxlength="300" placeholder="Когда его выбирать"></label>
+      <label>Инструкция для Grok <textarea id="custom-grok" required minlength="20" maxlength="1500" rows="5" placeholder="Что продумать в плане, какие критерии задать, какие запросы для Grok Imagine подготовить"></textarea></label>
+      <label>Инструкция для Devin <textarea id="custom-devin" required minlength="20" maxlength="1500" rows="5" placeholder="Как реализовать в коде, что проверить, что указать в отчёте"></textarea></label>
+      <p class="dim">Скилл виден только в этом браузере. Он не даёт агентам новых разрешений: PR, лимит ACU и подтверждение платной генерации задаются в задаче. Не добавляй ключи и пароли.</p>
+      <div class="skill-actions">
+        <button id="custom-save" type="submit" class="market-primary">Сохранить в библиотеку</button>
+        <button id="custom-media" type="button" class="market-button">Заполнить примером с фото и видео</button>
+      </div>
+      <p id="custom-error" class="market-error" role="alert" hidden></p>
+    </form>
   </dialog>
   <footer class="status-bar">
     <span id="footer-revision" class="footer-revision"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg><span>GitHub</span></span>

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 GROK_MODEL = "grok-4.7"
+GrokProvider = Literal["antig", "xai"]
 REPORT_FIELDS = ("summary", "checks", "remaining")
 
 
@@ -68,22 +71,23 @@ def collect_chat_stream(raw: bytes) -> dict[str, Any]:
 
 def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
                  stream_model: str = "", headers: dict[str, str] | None = None,
-                 list_items: bool = False) -> dict[str, Any]:
+                 list_items: bool = False, limit: int = 4_000_000) -> dict[str, Any]:
     request_headers = {"Accept": "application/json", **(headers or {})}
     if key:
         request_headers["Authorization"] = f"Bearer {key}"
     req = Request(url, headers=request_headers)
     if stream_model:
         req.add_header("Accept", "text/event-stream, application/json")
-        req.add_header("x-grok-model-override", stream_model)
+        if urlsplit(url).hostname == "grok.antig.ru":
+            req.add_header("x-grok-model-override", stream_model)
     if payload is not None:
         req.add_header("Content-Type", "application/json")
         req.data = json.dumps(payload).encode()
     try:
         with build_opener(NoRedirect()).open(req, timeout=120 if payload is not None else 15) as response:
             event_stream = response.headers.get_content_type() == "text/event-stream"
-            raw = response.read(4_000_001)
-        if len(raw) > 4_000_000:
+            raw = response.read(limit + 1)
+        if len(raw) > limit:
             raise ProviderError("Ответ сервиса превысил лимит размера.")
         data = collect_chat_stream(raw) if stream_model and event_stream else json.loads(raw)
     except HTTPError as exc:
@@ -117,6 +121,16 @@ def https_url(value: Any) -> str:
     return ""
 
 
+def image_type(raw: bytes) -> str:
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
 def identifier(value: Any) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
         raise ProviderError("Сервис не вернул корректный ID задачи.")
@@ -126,8 +140,10 @@ def identifier(value: Any) -> str:
 class AntiG:
     base = "https://grok.antig.ru/v1"
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, provider: GrokProvider = "antig") -> None:
         self.key = key
+        if provider == "xai":
+            self.base = "https://api.x.ai/v1"
 
     def text(self, prompt: str, system: str) -> tuple[str, ChatUsage]:
         data = request_json(f"{self.base}/chat/completions", self.key, {
@@ -147,14 +163,25 @@ class AntiG:
         return content[:60_000], ChatUsage.read(data.get("usage"))
 
     def image(self, prompt: str, model: str) -> dict[str, Any]:
+        # Base64 keeps the file on the bridge: provider URLs are temporary and AntiG may omit them.
         data = request_json(f"{self.base}/images/generations", self.key, {
-            "model": model, "prompt": prompt, "n": 1,
-        })
+            "model": model, "prompt": prompt, "n": 1, "response_format": "b64_json",
+        }, limit=24_000_000)
         items = data.get("data")
         first = items[0] if isinstance(items, list) and items else None
+        encoded = first.get("b64_json") if isinstance(first, dict) else None
+        if isinstance(encoded, str) and encoded:
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                raise ProviderError("Grok вернул повреждённое изображение.") from None
+            kind = image_type(raw)
+            if not kind:
+                raise ProviderError("Grok вернул файл неизвестного формата.")
+            return {"status": "done", "media": raw, "media_type": kind}
         url = https_url(first.get("url")) if isinstance(first, dict) else ""
         if not url:
-            raise ProviderError("AntiG не вернул ссылку на изображение.")
+            raise ProviderError("Grok не вернул изображение.")
         return {"status": "done", "media_url": url}
 
     def start_video(self, prompt: str, model: str) -> dict[str, Any]:

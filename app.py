@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import secrets
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, closing
@@ -15,10 +17,13 @@ from time import time
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.security import HTTPBasic
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
 from orchestration import (
     DEVIN_ROUTES,
@@ -26,11 +31,12 @@ from orchestration import (
     REVIEWER,
     ROUTER,
     demo_decision,
+    explicit_media,
     handoff,
     parse_decision,
     with_skills,
 )
-from providers import GROK_MODEL, AntiG, ChatUsage, Devin, ProviderError
+from providers import GROK_MODEL, AntiG, ChatUsage, Devin, GrokProvider, ProviderError
 from repository import (
     DEMO_FILES,
     MAX_CONTEXT_CHARS,
@@ -68,6 +74,9 @@ class Settings:
     devin_org: str = ""
     github_read_token: str = ""
     public_skills: bool = False
+    xai_key: str = ""
+    grok_provider: GrokProvider = "antig"
+    admin_key: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -80,6 +89,9 @@ class Settings:
             devin_org=os.getenv("DEVIN_ORG_ID", "").strip(),
             github_read_token=os.getenv("GITHUB_READ_TOKEN", "").strip(),
             public_skills=os.getenv("BRIDGE_PUBLIC_SKILLS") == "1",
+            xai_key=os.getenv("XAI_API_KEY", "").strip(),
+            grok_provider="xai" if os.getenv("BRIDGE_GROK_PROVIDER") == "xai" else "antig",
+            admin_key=os.getenv("BRIDGE_ADMIN_KEY", ""),
         )
 
 
@@ -110,6 +122,14 @@ class Submission(BaseModel):
     draft_pr: bool = False
     review: bool = False
     skill_ids: list[SkillID] = Field(default_factory=list, max_length=MAX_TASK_SKILLS)
+    grok_provider: GrokProvider | None = None
+
+
+class KeySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: GrokProvider
+    key: SecretStr | None = None
+    reset: bool = False
 
 
 def iso_now() -> str:
@@ -151,6 +171,8 @@ class Store:
                 "review_allowed": "INTEGER NOT NULL DEFAULT 0",
                 "skills": "TEXT NOT NULL DEFAULT '[]'",
                 "devin_acu": "REAL",
+                "grok_provider": "TEXT NOT NULL DEFAULT 'antig'",
+                "hidden": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, schema in additions.items():
                 if column not in columns:
@@ -173,14 +195,14 @@ class Store:
     def get(self, job_id: str) -> dict[str, Any]:
         with closing(self.connect()) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if not row:
+        if not row or row["hidden"]:
             raise HTTPException(404, "Задача не найдена.")
         return self.decode(row)
 
     def recent(self) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
             columns = ", ".join(PUBLIC_COLUMNS)
-            rows = conn.execute(f"SELECT {columns} FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()
+            rows = conn.execute(f"SELECT {columns} FROM jobs WHERE NOT hidden ORDER BY created_at DESC LIMIT 100").fetchall()
         return [dict(row) for row in rows]
 
     def due(self, before: float) -> list[str]:
@@ -201,7 +223,7 @@ class Store:
 
     def overview(self, demo: bool) -> dict[str, Any]:
         with closing(self.connect()) as conn:
-            rows = conn.execute("SELECT status FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()
+            rows = conn.execute("SELECT status FROM jobs WHERE NOT hidden ORDER BY created_at DESC LIMIT 100").fetchall()
             status_counts = {key: sum(row["status"] in statuses for row in rows) for key, statuses in (
                 ("active", {"sending", "running", "reviewing"}), ("waiting", {"awaiting", "paused"}),
                 ("finished", {"done", "ended"}),
@@ -223,14 +245,28 @@ class Store:
                        "context_files": MAX_FILES, "context_chars": MAX_CONTEXT_CHARS},
         }
 
-    def insert(self, task: Submission, skills: list[dict[str, str]]) -> dict[str, Any]:
+    def clear(self) -> list[str]:
+        # Rows stay as empty shells so measured Devin ACU and Grok tokens remain in the overview.
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            ids = [row["id"] for row in conn.execute(
+                "SELECT id FROM jobs WHERE NOT hidden AND status IN ('done', 'ended', 'failed', 'awaiting')")]
+            conn.execute("""
+                UPDATE jobs SET hidden = 1, prompt = '', result = NULL, plan = NULL, reason = NULL, error = NULL,
+                                media_url = NULL, activity = '{}', skills = '[]', pr_url = NULL
+                WHERE NOT hidden AND status IN ('done', 'ended', 'failed', 'awaiting')
+            """)
+        return ids
+
+    def insert(self, task: Submission, skills: list[dict[str, str]], provider: GrokProvider) -> dict[str, Any]:
         job_id = uuid4().hex
         with closing(self.connect()) as conn, conn:
             conn.execute("""
-                INSERT INTO jobs (id, mode, prompt, model, repo, ref, commit_sha, max_acu, created_at, review_allowed, skills)
-                VALUES (?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (id, mode, prompt, model, repo, ref, commit_sha, max_acu, created_at, review_allowed,
+                                  skills, grok_provider)
+                VALUES (?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, task.prompt, GROK_MODEL, task.repo, task.ref, task.context.commit if task.context else None,
-                  task.max_acu, iso_now(), task.review, json.dumps(skills, ensure_ascii=False)))
+                  task.max_acu, iso_now(), task.review, json.dumps(skills, ensure_ascii=False), provider))
         return self.get(job_id)
 
     def apply(self, job_id: str, update: dict[str, Any], previous_status: str) -> bool:
@@ -261,12 +297,30 @@ def public_job(job: dict[str, Any], *, full: bool = True) -> dict[str, Any]:
 def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     store = Store(settings.db)
     skills = Skills(store.connect, public=not settings.demo or settings.public_skills)
-    antig = AntiG(settings.antig_key)
+    env_keys: dict[GrokProvider, str] = {"antig": settings.antig_key, "xai": settings.xai_key}
+    runtime_keys: dict[GrokProvider, str] = {}
+    selected_provider = settings.grok_provider
+    keys_lock = Lock()
 
-    def grok_text(job_id: str, phase: str, prompt: str, system: str) -> str:
-        content, usage = antig.text(prompt, system)
+    def grok_client(provider: GrokProvider) -> AntiG:
+        with keys_lock:
+            return AntiG(runtime_keys.get(provider, env_keys[provider]), provider)
+
+    def require_grok(provider: GrokProvider) -> AntiG:
+        client = grok_client(provider)
+        if not client.key and not settings.demo:
+            raise ProviderError("Для выбранного API Grok не задан ключ.")
+        return client
+
+    def grok_text(client: AntiG, job_id: str, phase: str, prompt: str, system: str) -> str:
+        content, usage = client.text(prompt, system)
         store.record_grok(job_id, phase, usage)
         return content
+
+    media_dir = settings.db.parent / "media"
+
+    def media_file(job_id: str) -> Path | None:
+        return next((path for kind in ("jpeg", "png", "webp") if (path := media_dir / f"{job_id}.{kind}").is_file()), None)
 
     github = GitHub(settings.github_read_token)
     workspace = Workspace(github, settings.demo)
@@ -276,10 +330,13 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     poll_lock = Lock()
 
     def redact(text: str) -> str:
-        for secret in (settings.antig_key, settings.devin_key, settings.github_read_token):
+        with keys_lock:
+            keys = (*env_keys.values(), *runtime_keys.values(), settings.admin_key,
+                    settings.devin_key, settings.github_read_token)
+        for secret in keys:
             if secret:
                 text = text.replace(secret, "[скрыто]")
-        return text
+        return re.sub(r"\b(?:ag_|xai-)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
 
     def read_files(repo: str, commit: str, paths: list[str]) -> list[dict[str, str]]:
         if len(set(paths)) != len(paths) or not all(map(shareable_path, paths)):
@@ -293,7 +350,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise ProviderError("Слишком большой контекст. Выбери меньше файлов.")
         return files
 
-    def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]]) -> None:
+    def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]], grok: AntiG) -> None:
         try:
             files = read_files(task.repo, task.context.commit, task.context.paths) if task.repo and task.context else []
             context = json.dumps({
@@ -301,8 +358,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 "commit": task.context.commit if task.context else None,
                 "files": [{**file, "text": redact(file["text"])} for file in files],
             }, ensure_ascii=False)
-            decision = (demo_decision(task.prompt, task.repo) if settings.demo else
-                        parse_decision(grok_text(job_id, "route", context, with_skills(ROUTER, recipes, "grok"))))
+            # An explicit media request without a repository needs no Grok call to be routed.
+            local = None if task.repo else explicit_media(task.prompt)
+            decision = local or (demo_decision(task.prompt, task.repo) if settings.demo else parse_decision(
+                grok_text(grok, job_id, "route", context, with_skills(ROUTER, recipes, "grok"))))
             content = redact(decision.content)
             update: dict[str, Any] = {"route": decision.route, "reason": redact(decision.reason), "routed_at": iso_now()}
             if decision.route in DEVIN_ROUTES:
@@ -339,13 +398,19 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         try:
             route, prompt = job["route"], redact(job["prompt"])
             model = MEDIA_MODELS[route]
+            update: dict[str, Any]
             if settings.demo:
                 update = ({"status": "done", "media_url": "/static/sample.svg", "result": "Демо-изображение."}
                           if route == "image" else {"status": "running", "remote_id": "demo"})
-            elif not settings.antig_key:
-                raise ProviderError("Ключ AntiG не настроен.")
             else:
-                update = antig.image(prompt, model) if route == "image" else antig.start_video(prompt, model)
+                grok = require_grok(job["grok_provider"])
+                update = grok.image(prompt, model) if route == "image" else grok.start_video(prompt, model)
+                if "media" in update:
+                    media_dir.mkdir(parents=True, exist_ok=True)
+                    (media_dir / f"{job['id']}.{update['media_type']}").write_bytes(update["media"])
+                    update = {"status": "done", "media_url": f"/api/jobs/{job['id']}/media"}
+        except OSError:
+            update = {"status": "failed", "error": "Изображение получено, но не сохранилось на сервере."}
         except ProviderError as exc:
             update = {"status": "failed", "error": str(exc)}
         if update.get("status") in {"done", "failed"}:
@@ -354,11 +419,11 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     def review(job: dict[str, Any], report: dict[str, str]) -> None:
         try:
-            # Only the opted-in structured report, not raw messages, diffs or tool logs, goes back to AntiG.
+            # Only the opted-in structured report, not raw messages, diffs or tool logs, goes back to Grok.
             review_input = json.dumps({"request": redact(job["prompt"]), "devin_report": report}, ensure_ascii=False)
             result = ("Демо-разбор Grok: сверь проверку пустого файла с критериями задачи."
-                      if settings.demo else grok_text(job["id"], "review", review_input,
-                                                       with_skills(REVIEWER, job["skills"], "grok")))
+                      if settings.demo else grok_text(require_grok(job["grok_provider"]), job["id"], "review",
+                                                       review_input, with_skills(REVIEWER, job["skills"], "grok")))
             update = {"status": "ended", "result": redact(result), "reviewed_at": iso_now()}
         except ProviderError as exc:
             update = {"status": "ended", "error": f"Разбор Grok недоступен: {exc}"}
@@ -430,8 +495,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                     update = demo_update(job)
                 elif (route in DEVIN_ROUTES or route == "devin") and devin:
                     update = devin_update(job, devin)
-                elif route == "video" and settings.antig_key:
-                    update = antig.video_status(remote_id)
+                elif route == "video":
+                    update = require_grok(job["grok_provider"]).video_status(remote_id)
                 else:
                     raise ProviderError("Ключ для обновления статуса не настроен.")
             except ProviderError as exc:
@@ -482,9 +547,30 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)
 
-    app = FastAPI(title="AntiG × Devin", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    basic = HTTPBasic(auto_error=False, realm="Bridge")
+
+    async def authenticate(request: Request) -> None:
+        if not settings.admin_key:
+            return
+        auth = await basic(request)
+        if (auth is None or auth.username != "bridge"
+                or not secrets.compare_digest(auth.password.encode(), settings.admin_key.encode())):
+            raise HTTPException(401, "Войди в кабинет.", headers={"WWW-Authenticate": 'Basic realm="Bridge"'})
+
+    def require_admin_enabled() -> None:
+        if not settings.admin_key:
+            raise HTTPException(403, "Включи защиту кабинета через BRIDGE_ADMIN_KEY на сервере.")
+
+    app = FastAPI(title="AntiG × Devin", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan,
+                  dependencies=[Depends(authenticate)])
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
     app.include_router(skills.routes(redact))
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> Response:
+        if request.url.path == "/api/settings":
+            return JSONResponse({"detail": "Проверь поля настроек."}, status_code=422)
+        return await request_validation_exception_handler(request, exc)
 
     @app.middleware("http")
     async def protect(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -513,6 +599,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def sessions_page() -> FileResponse:
         return FileResponse(ROOT / "static" / "sessions.html")
 
+    @app.get("/settings")
+    def settings_page() -> FileResponse:
+        return FileResponse(ROOT / "static" / "settings.html")
+
     @app.get("/skills")
     def skills_page() -> FileResponse:
         return FileResponse(ROOT / "static" / "workspace.html")
@@ -524,16 +614,64 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.get("/api/config")
     def config() -> dict[str, Any]:
+        grok = grok_client(selected_provider)
         return {
             "demo": settings.demo,
             "antig": bool(settings.antig_key or settings.demo),
+            "grok": bool(grok.key or settings.demo),
+            "grok_provider": selected_provider,
             "devin": bool(devin or settings.demo),
             "github_private": bool(settings.github_read_token and not settings.demo),
+            "can_manage": bool(settings.admin_key),
         }
+
+    @app.get("/api/settings")
+    def key_status() -> dict[str, Any]:
+        with keys_lock:
+            return {
+                "provider": selected_provider,
+                "keys": {provider: "runtime" if provider in runtime_keys else "environment" if key else "missing"
+                         for provider, key in env_keys.items()},
+                "can_manage": bool(settings.admin_key),
+                "demo": settings.demo,
+            }
+
+    @app.post("/api/settings", dependencies=[Depends(require_admin_enabled)])
+    def update_keys(change: KeySettings) -> dict[str, Any]:
+        nonlocal selected_provider
+        key = change.key.get_secret_value().strip() if change.key else ""
+        if change.reset and key:
+            raise HTTPException(422, "Выбери замену ключа или сброс, но не оба действия.")
+        pattern = r"ag_[A-Za-z0-9_-]{16,508}" if change.provider == "antig" else r"xai-[A-Za-z0-9_-]{16,508}"
+        if key and not re.fullmatch(pattern, key):
+            raise HTTPException(422, "Формат ключа не подходит выбранному провайдеру.")
+        with keys_lock:
+            if change.reset:
+                runtime_keys.pop(change.provider, None)
+            elif key:
+                runtime_keys[change.provider] = key
+            selected_provider = change.provider
+        return key_status()
 
     @app.get("/api/jobs")
     def recent() -> list[dict[str, Any]]:
         return [public_job(row, full=False) for row in store.recent()]
+
+    @app.post("/api/jobs/clear")
+    def clear_jobs() -> dict[str, int]:
+        ids = store.clear()
+        for job_id in ids:
+            if path := media_file(job_id):
+                path.unlink(missing_ok=True)
+        return {"cleared": len(ids)}
+
+    @app.get("/api/jobs/{job_id}/media")
+    def job_media(job_id: JobID) -> FileResponse:
+        store.get(job_id)
+        path = media_file(job_id)
+        if not path:
+            raise HTTPException(404, "Файл не найден.")
+        return FileResponse(path, media_type=f"image/{path.suffix[1:]}")
 
     @app.get("/api/overview")
     def overview() -> dict[str, Any]:
@@ -587,8 +725,13 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.post("/api/jobs", status_code=202)
     def submit(task: Submission, background: BackgroundTasks, request: Request) -> dict[str, Any]:
-        if not settings.demo and not settings.antig_key:
-            raise HTTPException(503, "Добавь ключ AntiG и перезапусти сервер.")
+        provider = selected_provider
+        if task.grok_provider and task.grok_provider != provider:
+            raise HTTPException(409, "Провайдер Grok изменился. Обнови страницу и проверь настройки.")
+        try:
+            grok = require_grok(provider)
+        except ProviderError as exc:
+            raise HTTPException(503, str(exc)) from None
         if (task.ref or task.context or task.draft_pr or task.review) and not task.repo:
             raise HTTPException(422, "Для ветки, контекста или настроек Devin укажи репозиторий.")
         if task.repo and not valid_repo(task.repo):
@@ -600,8 +743,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise HTTPException(422, "Для контекста укажи ветку и разные файлы без секретов.")
         task.prompt = redact(task.prompt)
         recipes = skills.task_skills(skills.browser(request), task.skill_ids)
-        current = store.insert(task, recipes)
-        background.add_task(dispatch, current["id"], task, recipes)
+        current = store.insert(task, recipes, provider)
+        background.add_task(dispatch, current["id"], task, recipes, grok)
         return public_job(current)
 
     @app.post("/api/jobs/{job_id}/generate", status_code=202)

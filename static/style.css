@@ -237,3 +237,17 @@ footer { color: var(--text-muted); font-size: 12px; display: flex; flex-wrap: wr
   .agent-tile, .orbit-dot { animation: none; }
   .metric { transition: none; }
 }
+
+.settings-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+.settings-card form, .settings-body { display: grid; gap: 14px; padding: 20px; }
+.provider-choice { display: grid; gap: 10px; border: 0; padding: 0; margin: 0; }
+.provider-choice legend { margin-bottom: 8px; }
+.provider-option { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 12px; cursor: pointer; }
+.provider-option:has(input:checked) { border-color: var(--accent); }
+.provider-option small { display: block; opacity: .7; }
+.settings-summary { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; padding: 16px 20px;
+  margin-top: 20px; text-decoration: none; color: inherit; }
+.settings-summary small { display: block; opacity: .7; margin-top: 2px; }
+button.danger { color: var(--error); }
+@media (max-width: 900px) { .settings-layout { grid-template-columns: 1fr; } }

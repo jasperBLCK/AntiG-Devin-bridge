@@ -19,6 +19,7 @@
       <a href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
       <a href="/sessions" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
       <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
+      <a href="/settings"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Настройки</a>
     </nav>
     <div class="sidebar-foot"><span class="nav-caption">ОРКЕСТРАЦИЯ</span><strong>Grok + Devin</strong><span>Одна задача, два агента</span></div>
   </aside>
@@ -39,6 +40,7 @@
       <section class="panel history" id="sessions" aria-labelledby="history-title">
         <div class="panel-header">
           <h2 id="history-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Задачи <span id="history-count" class="count">0</span></h2>
+          <button id="clear-sessions" type="button" class="quiet danger">Очистить завершённые</button>
           <button id="reload" type="button" class="quiet" title="Обновить историю" aria-label="Обновить историю"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#refresh"/></svg></button>
         </div>
         <div class="history-tools">

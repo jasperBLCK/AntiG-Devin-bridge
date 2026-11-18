@@ -58,8 +58,9 @@
     const cards = results.map((item) => {
       const card = node("button", "", "market-card");
       card.type = "button";
-      const status = currentTab === "recommended" ? (item.recipe_group === "design" ? "Дизайн и UI" : "Инженерия") :
-        item.recipe_title ? "Готово для агентов" : "Из Skills.sh";
+      const status = item.recipe_group === "custom" ? "Мой скилл" :
+        currentTab === "recommended" ? (item.recipe_group === "design" ? "Дизайн и UI" : "Инженерия") :
+          item.recipe_title ? "Готово для агентов" : "Из Skills.sh";
       const label = item.installed ? "В библиотеке" : status;
       const badge = node("span", item.rank ? "#" + item.rank + " · " + label : label, "market-badge");
       badge.dataset.ready = String(Boolean(item.recipe_title));
@@ -135,7 +136,9 @@
     byId("skill-title").textContent = item.recipe_title || item.name;
     byId("skill-source").textContent = item.source;
     byId("skill-description").textContent = item.description || "Описание открывается на странице источника.";
-    byId("skill-note").textContent = item.recipe_title
+    byId("skill-note").textContent = item.recipe_group === "custom"
+      ? "Твой скилл. Агенты получают его текст только в задачах, где ты его выбрал; новых разрешений он не даёт."
+      : item.recipe_title
       ? "Мост подключает свой проверенный текстовый набор для этой задачи. Скрипты и зависимости не устанавливаются."
       : "Сохраняется карточка. Внешние инструкции и скрипты не передаются агентам.";
     const details = byId("skill-recipe");
@@ -147,7 +150,7 @@
     }
     byId("skill-score").textContent = ratings(item);
     install.disabled = saving;
-    install.textContent = item.installed ? "Убрать из библиотеки" : item.recipe_title ? "Установить" : "Сохранить в библиотеку";
+    install.textContent = item.recipe_group === "custom" ? "Удалить скилл" : item.installed ? "Убрать из библиотеки" : item.recipe_title ? "Установить" : "Сохранить в библиотеку";
     const task = byId("skill-task");
     task.hidden = !item.installed || !item.recipe_title;
     const params = new URLSearchParams({ skill: item.id });
@@ -263,6 +266,41 @@
     if (openSkill && text) void change("/review", { skill_id: openSkill.id, stars: Number(byId("skill-stars").value), text });
   });
   byId("skill-close").addEventListener("click", () => dialog.close());
+  const customDialog = byId("custom-dialog");
+  const customFields = { title: "custom-name", description: "custom-description", grok: "custom-grok", devin: "custom-devin" };
+  byId("custom-open").addEventListener("click", () => customDialog.showModal());
+  byId("custom-close").addEventListener("click", () => customDialog.close());
+  byId("custom-media").addEventListener("click", () => {
+    const example = {
+      title: "Лендинг с фото и видео Grok",
+      description: "Для страниц, где нужен сильный первый экран с собственными изображениями или роликом.",
+      grok: "Опиши первый экран: главное сообщение, одно действие и один визуальный акцент. Составь список ассетов " +
+        "с местом, соотношением сторон и готовым запросом для Grok Imagine на английском; для видео — до 6 секунд, " +
+        "бесшовный цикл, без текста. Генерация идёт отдельной задачей с подтверждением.",
+      devin: "Встраивай только файлы, которые есть в репозитории. Для остальных оставь заглушки нужного размера и " +
+        "перечисли их в отчёте. Видео: muted, loop, playsinline, poster; при prefers-reduced-motion показывай постер. " +
+        "Проверь узкий экран и отсутствие сдвига макета.",
+    };
+    for (const [field, id] of Object.entries(customFields)) byId(id).value = example[field];
+  });
+  byId("custom-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = byId("custom-error");
+    const payload = Object.fromEntries(Object.entries(customFields).map(([field, id]) => [field, byId(id).value.trim()]));
+    byId("custom-save").disabled = true;
+    error.hidden = true;
+    try {
+      await api("/custom", { payload });
+      event.target.reset();
+      customDialog.close();
+      selectTab("library");
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.hidden = false;
+    } finally {
+      byId("custom-save").disabled = false;
+    }
+  });
   dialog.addEventListener("close", () => {
     detailAbort?.abort();
     openSkill = null;

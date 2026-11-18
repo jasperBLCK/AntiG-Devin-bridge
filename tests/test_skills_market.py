@@ -144,7 +144,7 @@ class SkillMarketTests(unittest.TestCase):
             self.assertEqual(installs, sorted(installs, reverse=True))
             self.assertEqual(external.call_count, len(TOPICS))
             recommended = client.get("/api/skills", params={"tab": "recommended"}).json()["items"]
-            self.assertEqual(recommended[0]["recipe_title"], "От плана к реализации")
+            self.assertEqual(recommended[0]["recipe_title"], "Студия: дизайн с характером")
             self.assertTrue(all(item["recipe_title"] and item["description"] for item in recommended))
             self.assertEqual(external.call_count, len(TOPICS))
 
@@ -187,6 +187,35 @@ class SkillMarketTests(unittest.TestCase):
                 rows = results(tab="recommended", group=kind)["items"]
                 self.assertGreater(len(rows), 5)
                 self.assertTrue(all(item["recipe_group"] == kind for item in rows))
+
+    def test_custom_skill_is_private_reaches_both_agents_and_is_deleted_with_its_text(self):
+        skill = {"title": "Hero with media", "description": "Landing pages",
+                 "grok": "Prepare Grok Imagine prompts for the hero.", "devin": "Embed committed media with a poster."}
+        with self.client(demo=False) as owner, self.client(demo=False) as other, patch("providers.request_json") as provider:
+            provider.side_effect = [route("inspect"), {"session_id": "sample", "status": "new"}]
+            short = owner.post("/api/skills/custom", json={**skill, "grok": "short"}, headers=WRITE)
+            self.assertEqual(short.status_code, 422)
+            created = owner.post("/api/skills/custom", json=skill, headers=WRITE)
+            self.assertEqual(created.status_code, 201)
+            skill_id = created.json()["id"]
+            card = self.library(owner)[0]
+            self.assertEqual((card["id"], card["recipe_group"], card["installed"]), (skill_id, "custom", True))
+            self.assertEqual(self.info(owner, skill_id)["recipe"], {"grok": skill["grok"], "devin": skill["devin"]})
+            self.assertEqual(other.get("/api/skills/info", params={"skill_id": skill_id}).status_code, 404)
+            self.assertEqual(self.select(other, skill_id).status_code, 404)
+            self.assertEqual(self.submit(other, [skill_id]).status_code, 422)
+            provider.assert_not_called()
+
+            self.assertEqual(self.submit(owner, [skill_id]).status_code, 202)
+            self.assertIn(skill["grok"], provider.call_args_list[0].args[2]["messages"][0]["content"])
+            devin = provider.call_args_list[1].args[2]["prompt"]
+            self.assertIn(skill["devin"], devin)
+            self.assertIn("Только чтение: не изменяй файлы", devin)
+            self.assertIn("Экономь ACU", devin)
+
+            self.assertEqual(self.select(owner, skill_id, installed=False).status_code, 200)
+            self.assertEqual(self.library(owner), [])
+            self.assertEqual(self.submit(owner, [skill_id]).status_code, 422)
 
     def test_only_selected_recipes_reach_grok_and_devin_and_survive_uninstall_for_review(self):
         with self.client(demo=False) as client, patch("providers.request_json") as provider:
