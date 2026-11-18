@@ -28,6 +28,7 @@ from orchestration import (
     demo_decision,
     handoff,
     parse_decision,
+    with_skills,
 )
 from providers import GROK_MODEL, AntiG, Devin, ProviderError
 from repository import (
@@ -38,6 +39,7 @@ from repository import (
     shareable_path,
     valid_repo,
 )
+from skills_market import MAX_TASK_SKILLS, SkillID, Skills
 from workspace import Revision, Workspace
 
 ROOT = Path(__file__).resolve().parent
@@ -63,6 +65,7 @@ class Settings:
     devin_key: str = ""
     devin_org: str = ""
     github_read_token: str = ""
+    public_skills: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -74,6 +77,7 @@ class Settings:
             devin_key=os.getenv("DEVIN_API_KEY", "").strip(),
             devin_org=os.getenv("DEVIN_ORG_ID", "").strip(),
             github_read_token=os.getenv("GITHUB_READ_TOKEN", "").strip(),
+            public_skills=os.getenv("BRIDGE_PUBLIC_SKILLS") == "1",
         )
 
 
@@ -103,6 +107,7 @@ class Submission(BaseModel):
     max_acu: int = Field(default=5, ge=1, le=100)
     draft_pr: bool = False
     review: bool = False
+    skill_ids: list[SkillID] = Field(default_factory=list, max_length=MAX_TASK_SKILLS)
 
 
 def iso_now() -> str:
@@ -137,6 +142,7 @@ class Store:
                 "routed_at": "TEXT", "finished_at": "TEXT", "reviewed_at": "TEXT",
                 "activity": "TEXT NOT NULL DEFAULT '{}'", "last_polled": "REAL NOT NULL DEFAULT 0",
                 "review_allowed": "INTEGER NOT NULL DEFAULT 0",
+                "skills": "TEXT NOT NULL DEFAULT '[]'",
             }
             for column, schema in additions.items():
                 if column not in columns:
@@ -154,7 +160,7 @@ class Store:
 
     @staticmethod
     def decode(row: sqlite3.Row) -> dict[str, Any]:
-        return {**dict(row), "activity": json.loads(row["activity"])}
+        return {**dict(row), "activity": json.loads(row["activity"]), "skills": json.loads(row["skills"])}
 
     def get(self, job_id: str) -> dict[str, Any]:
         with closing(self.connect()) as conn:
@@ -178,14 +184,14 @@ class Store:
             """, (before, before)).fetchall()
         return [row["id"] for row in rows]
 
-    def insert(self, task: Submission) -> dict[str, Any]:
+    def insert(self, task: Submission, skills: list[dict[str, str]]) -> dict[str, Any]:
         job_id = uuid4().hex
         with closing(self.connect()) as conn, conn:
             conn.execute("""
-                INSERT INTO jobs (id, mode, prompt, model, repo, ref, commit_sha, max_acu, created_at, review_allowed)
-                VALUES (?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (id, mode, prompt, model, repo, ref, commit_sha, max_acu, created_at, review_allowed, skills)
+                VALUES (?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, task.prompt, GROK_MODEL, task.repo, task.ref, task.context.commit if task.context else None,
-                  task.max_acu, iso_now(), task.review))
+                  task.max_acu, iso_now(), task.review, json.dumps(skills, ensure_ascii=False)))
         return self.get(job_id)
 
     def apply(self, job_id: str, update: dict[str, Any], previous_status: str) -> bool:
@@ -206,6 +212,7 @@ def public_job(job: dict[str, Any], *, full: bool = True) -> dict[str, Any]:
     result = {key: job[key] for key in PUBLIC_COLUMNS}
     if full:
         result.update({key: job[key] for key in ("result", "reason", "plan", "error", "media_url")})
+        result["skills"] = [{key: skill[key] for key in ("id", "title")} for skill in job["skills"]]
         result["activity"] = {key: val for key, val in job["activity"].items()
                               if key not in {"cursor", "pr_checked", "pr_url"}}
     return result
@@ -213,6 +220,7 @@ def public_job(job: dict[str, Any], *, full: bool = True) -> dict[str, Any]:
 
 def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     store = Store(settings.db)
+    skills = Skills(store.connect, public=not settings.demo or settings.public_skills)
     antig = AntiG(settings.antig_key)
     github = GitHub(settings.github_read_token)
     workspace = Workspace(github, settings.demo)
@@ -239,7 +247,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise ProviderError("Слишком большой контекст. Выбери меньше файлов.")
         return files
 
-    def dispatch(job_id: str, task: Submission) -> None:
+    def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]]) -> None:
         try:
             files = read_files(task.repo, task.context.commit, task.context.paths) if task.repo and task.context else []
             context = json.dumps({
@@ -247,7 +255,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 "commit": task.context.commit if task.context else None,
                 "files": [{**file, "text": redact(file["text"])} for file in files],
             }, ensure_ascii=False)
-            decision = demo_decision(task.prompt, task.repo) if settings.demo else parse_decision(antig.text(context, ROUTER))
+            decision = (demo_decision(task.prompt, task.repo) if settings.demo else
+                        parse_decision(antig.text(context, with_skills(ROUTER, recipes, "grok"))))
             content = redact(decision.content)
             update: dict[str, Any] = {"route": decision.route, "reason": redact(decision.reason), "routed_at": iso_now()}
             if decision.route in DEVIN_ROUTES:
@@ -259,6 +268,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                     prompt = handoff(
                         redact(task.prompt), content, task.repo, task.ref, task.context.commit if task.context else None,
                         inspect=decision.route == "inspect", draft_pr=task.draft_pr,
+                        skills=recipes,
                     )
                     if settings.demo:
                         update.update(status="running", remote_id="demo")
@@ -301,7 +311,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             # Only the opted-in structured report, not raw messages, diffs or tool logs, goes back to AntiG.
             review_input = json.dumps({"request": redact(job["prompt"]), "devin_report": report}, ensure_ascii=False)
             result = ("Демо-разбор Grok: сверь проверку пустого файла с критериями задачи."
-                      if settings.demo else antig.text(review_input, REVIEWER))
+                      if settings.demo else antig.text(review_input, with_skills(REVIEWER, job["skills"], "grok")))
             update = {"status": "ended", "result": redact(result), "reviewed_at": iso_now()}
         except ProviderError as exc:
             update = {"status": "ended", "error": f"Разбор Grok недоступен: {exc}"}
@@ -416,6 +426,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.init()
+        skills.init()
         worker = asyncio.create_task(monitor()) if poll_seconds > 0 else None
         try:
             yield
@@ -426,6 +437,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     app = FastAPI(title="AntiG × Devin", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+    app.include_router(skills.routes(redact))
 
     @app.middleware("http")
     async def protect(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -445,6 +457,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(ROOT / "static" / "index.html")
+
+    @app.get("/skills")
+    def skills_page() -> FileResponse:
+        return FileResponse(ROOT / "static" / "workspace.html")
 
     @app.get("/workspace/{job_id}")
     def workspace_page(job_id: JobID) -> FileResponse:
@@ -511,7 +527,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         return {"commit": target.commit, "files": files}
 
     @app.post("/api/jobs", status_code=202)
-    def submit(task: Submission, background: BackgroundTasks) -> dict[str, Any]:
+    def submit(task: Submission, background: BackgroundTasks, request: Request) -> dict[str, Any]:
         if not settings.demo and not settings.antig_key:
             raise HTTPException(503, "Добавь ключ AntiG и перезапусти сервер.")
         if (task.ref or task.context or task.draft_pr or task.review) and not task.repo:
@@ -524,8 +540,9 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                              or not all(map(shareable_path, task.context.paths))):
             raise HTTPException(422, "Для контекста укажи ветку и разные файлы без секретов.")
         task.prompt = redact(task.prompt)
-        current = store.insert(task)
-        background.add_task(dispatch, current["id"], task)
+        recipes = skills.task_skills(skills.browser(request), task.skill_ids)
+        current = store.insert(task, recipes)
+        background.add_task(dispatch, current["id"], task, recipes)
         return public_job(current)
 
     @app.post("/api/jobs/{job_id}/generate", status_code=202)

@@ -332,6 +332,7 @@ function showResult() {
   if (job.repo) root.append(element("p", [job.repo, job.ref || "база по умолчанию", job.commit_sha?.slice(0, 8)]
     .filter(Boolean).join(" · "), "mono muted"));
   root.append(element("p", job.prompt, "muted"));
+  if (job.skills?.length) root.append(element("p", "Для задачи: " + job.skills.map((skill) => skill.title).join(" · "), "muted"));
   if (job.reason) root.append(element("p", job.reason));
   if (job.error) root.append(element("p", job.error, "error"));
   const actions = element("div", "", "result-actions");
@@ -397,6 +398,31 @@ async function selectJob(id) {
   await load();
 }
 
+async function loadTaskSkills() {
+  const params = new URLSearchParams(location.search);
+  const hint = $("task-skills-hint");
+  const list = $("task-skill-list");
+  try {
+    const data = await api("/api/skills?tab=library");
+    const installed = data.items.filter((item) => item.recipe_title);
+    hint.textContent = installed.length
+      ? "Только выбранные инструкции. Они не запускают агента и не меняют его разрешений."
+      : "Пока нет установленных скиллов, готовых для агентов.";
+    for (const skill of installed) {
+      const label = element("label", "", "confirmation");
+      const box = element("input");
+      box.type = "checkbox";
+      box.name = "task-skill";
+      box.value = skill.id;
+      box.checked = params.get("skill") === skill.id;
+      label.append(box, document.createTextNode(skill.recipe_title));
+      list.append(label);
+    }
+  } catch (error) {
+    hint.textContent = "Библиотека недоступна. Задачу можно запустить без скиллов.";
+  }
+}
+
 $("reload").addEventListener("click", () => void load());
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -417,6 +443,11 @@ form.addEventListener("submit", async (event) => {
   if (ref) payload.ref = ref;
   if (project.context && $("share-context").checked) {
     payload.context = { commit: project.context.commit, paths: project.context.files.map((file) => file.path) };
+  }
+  payload.skill_ids = [...form.querySelectorAll("input[name=task-skill]:checked")].map((box) => box.value);
+  if (payload.skill_ids.length > 4) {
+    message("form-error", "Выбери не больше четырёх скиллов.");
+    return;
   }
   state.busy = true;
   message("form-error", "");
@@ -452,5 +483,13 @@ async function init() {
   }
 }
 
+const initialTask = new URLSearchParams(location.search);
+if (initialTask.get("skill")) {
+  const repo = initialTask.get("repo");
+  const ref = initialTask.get("ref");
+  if (repo && repo.length <= 200 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) $("repo").value = repo;
+  if (ref && ref.length <= 200 && /^[A-Za-z0-9_./-]+$/.test(ref)) $("git-ref").value = ref;
+}
 updateForm();
+void loadTaskSkills();
 void init();

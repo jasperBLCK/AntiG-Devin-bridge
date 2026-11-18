@@ -7,6 +7,8 @@
   <title>Редактор сессии · Мост</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/workspace.css">
+  <link rel="stylesheet" href="/static/marketplace.css">
+  <script src="/static/marketplace.js" defer></script>
   <script src="/static/workspace.js" defer></script>
 </head>
 <body data-explorer="true">
@@ -23,6 +25,7 @@
     <nav class="rail" aria-label="Панели редактора">
       <button id="toggle-explorer" class="rail-button" type="button" aria-label="Показать или скрыть файлы" aria-controls="explorer" aria-pressed="true" title="Файлы"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#files"/></svg></button>
       <button id="focus-search" class="rail-button" type="button" aria-label="Поиск файлов" title="Поиск файлов"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg></button>
+      <button id="toggle-skills" class="rail-button" type="button" aria-controls="skills-market" aria-pressed="false" aria-label="Скиллы" title="Скиллы"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg></button>
       <button id="toggle-journal" class="rail-button" type="button" aria-label="Показать или скрыть журнал" aria-controls="journal" aria-pressed="true" title="Журнал"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#terminal"/></svg></button>
     </nav>
     <aside id="explorer" class="explorer" aria-label="Файлы из GitHub">
@@ -67,7 +70,70 @@
         <div class="log-scroll" id="log-scroll" tabindex="0" aria-label="Сообщения сессии"><ol class="log" id="log"></ol></div>
       </section>
     </main>
+    <section class="market" id="skills-market" aria-labelledby="market-title" hidden>
+      <div class="market-inner">
+        <header class="market-hero">
+          <div class="market-kicker"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg> МАРКЕТПЛЕЙС АГЕНТОВ</div>
+          <h1 id="market-title">Скиллы</h1>
+          <p>Найди нужный набор инструкций, добавь его в библиотеку и подключи к задаче Grok и Devin.</p>
+        </header>
+        <div class="market-controls">
+          <nav class="market-filters" aria-label="Разделы скиллов">
+            <button type="button" data-market-tab="catalog" aria-pressed="true">Каталог</button>
+            <button type="button" data-market-tab="ready" aria-pressed="false">Готовые для агентов</button>
+            <button type="button" data-market-tab="library" aria-pressed="false">Моя библиотека</button>
+          </nav>
+          <label class="market-search"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg>
+            <input id="market-query" type="search" maxlength="100" aria-label="Поиск скиллов" placeholder="Название или тема: React, Python, design…">
+          </label>
+        </div>
+        <div class="market-meta">
+          <p id="market-status" role="status">Загружаю каталог…</p>
+          <label>Сортировка <select id="market-sort">
+            <option value="default">Рекомендуемые</option>
+            <option value="installs">По установкам</option>
+            <option value="rating">По отзывам</option>
+          </select></label>
+        </div>
+        <div id="market-results" class="market-results"></div>
+        <p class="market-source">Каталог и установки — <a href="https://skills.sh/" target="_blank" rel="noopener noreferrer">Skills.sh</a>. Звёзды и отзывы — от пользователей «Моста».</p>
+      </div>
+    </section>
   </div>
+  <dialog id="skill-dialog" class="skill-dialog" aria-labelledby="skill-title">
+    <div class="skill-dialog-inner">
+      <header class="skill-detail-header">
+        <div><p id="skill-source" class="market-kicker"></p><h2 id="skill-title">Скилл</h2></div>
+        <button id="skill-close" class="icon-button" type="button" aria-label="Закрыть обзор"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#close"/></svg></button>
+      </header>
+      <p id="skill-description"></p>
+      <p id="skill-note" class="dim"></p>
+      <details id="skill-recipe" class="skill-recipe" hidden>
+        <summary>Что получат агенты</summary>
+        <p><strong>Grok</strong> <span id="skill-grok"></span></p>
+        <p><strong>Devin</strong> <span id="skill-devin"></span></p>
+      </details>
+      <div class="skill-actions">
+        <button id="skill-install" type="button" class="market-primary" disabled>Установить</button>
+        <a id="skill-task" class="market-button" hidden>К новой задаче</a>
+        <a id="skill-upstream" class="market-button" target="_blank" rel="noopener noreferrer" hidden>На Skills.sh ↗</a>
+      </div>
+      <p id="skill-error" class="market-error" role="alert" hidden></p>
+      <section class="skill-reviews" aria-labelledby="skill-review-title">
+        <h3 id="skill-review-title">Отзывы «Моста»</h3>
+        <p id="skill-score"></p>
+        <form id="skill-review-form" hidden>
+          <label>Оценка <select id="skill-stars" required>
+            <option value="">Выбрать</option><option value="5">5 — отлично</option><option value="4">4 — хорошо</option>
+            <option value="3">3 — нормально</option><option value="2">2 — слабо</option><option value="1">1 — плохо</option>
+          </select></label>
+          <label>Публичный отзыв <textarea id="skill-review-text" maxlength="1000" rows="3" required placeholder="Что было полезно? Не добавляй секреты или личные данные."></textarea></label>
+          <button id="skill-review-submit" class="market-button" type="submit">Опубликовать отзыв</button>
+        </form>
+        <ul id="skill-review-list"></ul>
+      </section>
+    </div>
+  </dialog>
   <footer class="status-bar">
     <span id="footer-revision" class="footer-revision"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg><span>GitHub</span></span>
     <span id="footer-count" class="footer-count"></span>
@@ -75,5 +141,6 @@
     <span id="footer-language"></span>
     <span class="status-readonly"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Только чтение</span>
   </footer>
+  <footer class="status-bar market-footer" hidden><span>Скиллы · Библиотека этого браузера</span></footer>
 </body>
 </html>

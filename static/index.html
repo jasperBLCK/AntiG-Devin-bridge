@@ -13,7 +13,10 @@
   <header class="topbar">
     <div class="top-inner">
       <a href="/" class="brand"><img src="/static/icon.svg" width="29" height="29" alt=""><strong>Мост</strong><span>AntiG × Devin</span></a>
-      <span class="environment" id="environment">Подключение…</span>
+      <div class="header-links">
+        <a class="action-link" href="/skills">Скиллы</a>
+        <span class="environment" id="environment">Подключение…</span>
+      </div>
     </div>
   </header>
   <main>
@@ -63,6 +66,12 @@
             <div class="budget"><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
             <label class="confirmation"><input id="draft-pr" type="checkbox"> Разрешить черновик PR (без merge)</label>
             <label class="confirmation"><input id="review" type="checkbox" checked> Дать Grok разобрать итоговый отчёт Devin</label>
+          </fieldset>
+          <fieldset class="task-skills">
+            <legend>Скиллы для этой задачи</legend>
+            <p id="task-skills-hint" class="muted" role="status">Загружаю библиотеку…</p>
+            <div id="task-skill-list"></div>
+            <a href="/skills" class="action-link">Открыть маркетплейс</a>
           </fieldset>
           <div class="form-actions">
             <button type="submit" id="submit" class="primary" disabled>Запустить задачу</button>

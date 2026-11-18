@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const id = window.location.pathname.split("/").filter(Boolean).at(-1);
+const id = window.location.pathname.startsWith("/workspace/") ? window.location.pathname.split("/").filter(Boolean).at(-1) : null;
 const endpoint = "/api/jobs/" + id;
 const state = { job: null, tree: null, tabs: new Map(), active: null, expanded: new Set(), request: 0 };
 const statuses = {
@@ -327,6 +327,8 @@ function renderJob(job) {
     $("job-state").replaceChildren(make("span", "", "state-dot"), make("span", visibleStatus));
   }
   const events = [];
+  if (job.skills?.length) events.push({ actor: "Панель", at: Date.parse(job.created_at),
+    text: "Для задачи: " + job.skills.map((skill) => skill.title).join(" · ") });
   if (job.reason) events.push({ actor: "Grok", text: job.reason, at: Date.parse(job.routed_at) });
   for (const message of job.activity?.messages || []) {
     events.push({ actor: "Devin", text: message.text, at: message.at < 1e12 ? message.at * 1000 : message.at });
@@ -362,13 +364,34 @@ function setJournal(visible) {
 }
 
 function focusSearch() {
+  setMarket(false);
   setExplorer(true);
   $("file-search").focus();
 }
 
-$("toggle-explorer").addEventListener("click", () => setExplorer(document.body.dataset.explorer !== "true"));
+function setMarket(visible) {
+  document.body.dataset.market = String(visible);
+  $("skills-market").hidden = !visible;
+  document.querySelector(".market-footer").hidden = !visible;
+  $("toggle-skills").setAttribute("aria-pressed", String(visible));
+  $("toggle-explorer").setAttribute("aria-pressed", String(!visible && document.body.dataset.explorer === "true"));
+  if (visible) window.BridgeMarketplace.open(() => state.job);
+}
+
+$("toggle-skills").addEventListener("click", () => {
+  if (id) setMarket($("skills-market").hidden);
+});
+$("toggle-explorer").addEventListener("click", () => {
+  const visible = !$("skills-market").hidden;
+  setMarket(false);
+  setExplorer(visible || document.body.dataset.explorer !== "true");
+});
 $("focus-search").addEventListener("click", focusSearch);
-$("toggle-journal").addEventListener("click", () => setJournal($("journal").hidden));
+$("toggle-journal").addEventListener("click", () => {
+  const visible = !$("skills-market").hidden;
+  setMarket(false);
+  setJournal(visible || $("journal").hidden);
+});
 $("close-journal").addEventListener("click", () => {
   setJournal(false);
   $("toggle-journal").focus();
@@ -425,4 +448,10 @@ async function init() {
   }, 4000);
 }
 
-void init();
+if (!id) {
+  document.body.dataset.marketOnly = "true";
+  $("top-repo").textContent = "Маркетплейс";
+  document.title = "Скиллы · Мост";
+}
+if (!id || new URLSearchParams(location.search).get("panel") === "skills") setMarket(true);
+if (id) void init();
