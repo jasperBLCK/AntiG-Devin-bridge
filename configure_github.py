@@ -15,6 +15,7 @@ from http.client import HTTPConnection, HTTPException
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socket import create_connection
 from stat import S_IMODE
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -250,6 +251,13 @@ def bridge_ready(port: int) -> bool:
 
 
 def serve(config: LocalConfig, python: Path) -> int:
+    try:
+        connection = create_connection((HOST, config.port), timeout=.4)
+    except OSError:
+        pass
+    else:
+        connection.close()
+        raise SetupError(f"Порт {config.port} уже занят. Останови старый процесс «Моста» (Ctrl+C) и запусти снова.")
     args = [str(python), "-m", "uvicorn", "app:app", "--host", HOST, "--port", str(config.port), "--no-access-log"]
     with subprocess.Popen(args, cwd=ROOT, env=config.environment()) as process:
         deadline = monotonic() + 20

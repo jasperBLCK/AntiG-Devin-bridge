@@ -98,6 +98,18 @@ class LocalInstallerTests(unittest.TestCase):
         with self.assertRaises(installer.SetupError):
             installer.save_config(self.path, config)
 
+    def test_serve_does_not_open_an_old_instance_on_an_occupied_port(self):
+        with socket.socket() as running, patch("configure_github.subprocess.Popen") as start, \
+                patch("configure_github.open_browser") as browser:
+            running.bind((installer.HOST, 0))
+            running.listen()
+            port = running.getsockname()[1]
+            config = installer.LocalConfig("mock-bridge", "mock-client", "unused-mock", 42, port)
+            with self.assertRaisesRegex(installer.SetupError, f"Порт {port} уже занят"):
+                installer.serve(config, Path(sys.executable))
+            start.assert_not_called()
+            browser.assert_not_called()
+
     def test_malformed_registration_is_not_exchanged_or_saved(self):
         with patch("configure_github.request_json") as remote:
             with self.assertRaises(installer.SetupError):

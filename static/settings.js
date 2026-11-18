@@ -8,6 +8,7 @@
   const devinKey = byId("devin-key");
   const devinOrg = byId("devin-org");
   const labels = { missing: "Нет ключа", environment: "Из окружения", runtime: "Введён в панели" };
+  const outdated = "Сервер «Моста» не обновился. Останови его, запусти снова и обнови страницу.";
   let current = null;
 
   function provider() {
@@ -16,10 +17,12 @@
 
   function draw(data) {
     current = data;
-    for (const [name, status] of Object.entries({ ...data.keys, devin: data.devin })) {
+    for (const [name, status] of Object.entries(data.keys)) {
       byId("key-" + name).textContent = labels[status];
       byId("key-" + name).dataset.status = status === "missing" ? "failed" : "done";
     }
+    byId("key-devin").textContent = labels[data.devin] ?? "Требуется перезапуск";
+    byId("key-devin").dataset.status = data.devin && data.devin !== "missing" ? "done" : "failed";
     refresh();
   }
 
@@ -30,10 +33,11 @@
     key.disabled = !current.can_manage;
     byId("settings-note").textContent = current.can_manage ? "" :
       "Менять ключи можно только в защищённом кабинете.";
-    byId("save-devin").disabled = !current.can_manage;
-    byId("reset-devin").disabled = !current.can_manage || current.devin !== "runtime";
-    devinKey.disabled = devinOrg.disabled = !current.can_manage;
-    byId("devin-settings-note").textContent = byId("settings-note").textContent;
+    const canManageDevin = current.can_manage && Object.hasOwn(labels, current.devin);
+    byId("save-devin").disabled = !canManageDevin;
+    byId("reset-devin").disabled = !canManageDevin || current.devin !== "runtime";
+    devinKey.disabled = devinOrg.disabled = !canManageDevin;
+    byId("devin-settings-note").textContent = Object.hasOwn(labels, current.devin) ? byId("settings-note").textContent : outdated;
   }
 
   async function send(payload, isDevin = false) {
@@ -46,6 +50,7 @@
         headers: { "Content-Type": "application/json", "X-Bridge-Request": "1" },
         body: JSON.stringify(payload),
       });
+      if (isDevin && response.status === 404) throw new Error(outdated);
       const data = await response.json();
       if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Проверь поля настроек.");
       draw(data);
