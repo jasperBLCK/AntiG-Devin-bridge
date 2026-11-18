@@ -20,12 +20,18 @@ from uuid import uuid4
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
-from github_connect import GitHubApp, GitHubConnect
+from github_connect import (
+    DESTINATIONS,
+    Destination,
+    GitHubApp,
+    GitHubConnect,
+    login_url,
+)
 from orchestration import (
     DEVIN_ROUTES,
     MEDIA_MODELS,
@@ -66,6 +72,12 @@ DEFAULT_ACU = 5
 MAX_ACU = 100
 MAX_ASSET_BYTES = 20 * 1024 * 1024
 DEFAULT_MEDIA_HOSTS = ("vidgen.x.ai", "imgen.x.ai", "assets.grok.com")
+PUBLIC_LOGIN_ROUTES = frozenset({
+    "/login", "/api/github/status", "/api/github/start", "/api/github/callback", "/api/github/setup",
+    "/static/login.js", "/static/login.css", "/static/icon.svg",
+})
+DEMO_COOKIE = "bridge_demo_entry"
+LOGIN_TARGETS = {path: name for name, path in DESTINATIONS.items()}
 logger = logging.getLogger(__name__)
 PUBLIC_COLUMNS = (
     "id", "mode", "route", "prompt", "model", "repo", "ref", "commit_sha", "created_at", "status",
@@ -96,10 +108,13 @@ class Settings:
     github_write_repos: tuple[str, ...] = ()
     media_hosts: tuple[str, ...] = DEFAULT_MEDIA_HOSTS
     github_app: GitHubApp = field(default_factory=GitHubApp)
+    github_login_required: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
         demo = os.getenv("BRIDGE_MODE") == "demo"
+        admin_key = os.getenv("BRIDGE_ADMIN_KEY", "")
+        owner_id = os.getenv("BRIDGE_GITHUB_OWNER_ID", "").strip()
         return cls(
             db=Path(os.getenv("BRIDGE_DB", str(ROOT / "data" / ("demo.sqlite3" if demo else "bridge.sqlite3")))),
             demo=demo,
@@ -110,7 +125,7 @@ class Settings:
             public_skills=os.getenv("BRIDGE_PUBLIC_SKILLS") == "1",
             xai_key=os.getenv("XAI_API_KEY", "").strip(),
             grok_provider="xai" if os.getenv("BRIDGE_GROK_PROVIDER") == "xai" else "antig",
-            admin_key=os.getenv("BRIDGE_ADMIN_KEY", ""),
+            admin_key=admin_key,
             github_write_token=os.getenv("GITHUB_WRITE_TOKEN", "").strip(),
             github_write_repos=tuple(repo.strip().lower() for repo in os.getenv("BRIDGE_GITHUB_WRITE_REPOS", "").split(",")
                                      if valid_repo(repo.strip())),
@@ -119,7 +134,9 @@ class Settings:
             github_app=GitHubApp(os.getenv("BRIDGE_GITHUB_APP_SLUG", "").strip(),
                                  os.getenv("BRIDGE_GITHUB_CLIENT_ID", "").strip(),
                                  os.getenv("BRIDGE_GITHUB_CLIENT_SECRET", "").strip(),
-                                 os.getenv("BRIDGE_PUBLIC_ORIGIN", "").strip().rstrip("/")),
+                                 os.getenv("BRIDGE_PUBLIC_ORIGIN", "").strip().rstrip("/"),
+                                 int(owner_id) if re.fullmatch(r"[1-9][0-9]{0,19}", owner_id) else 0),
+            github_login_required=os.getenv("BRIDGE_REQUIRE_GITHUB_LOGIN") != "0" or not (demo or admin_key),
         )
 
 
@@ -384,7 +401,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     github = GitHub(settings.github_read_token)
     git_writer = GitHub(settings.github_write_token)
-    connect = GitHubConnect(settings.github_app, not settings.demo and bool(settings.admin_key))
+    gated = settings.github_login_required
+    oauth_allowed = settings.github_app.owner_id > 0 if gated else bool(settings.admin_key)
+    connect = GitHubConnect(settings.github_app, oauth_allowed, gated=gated, demo=settings.demo)
+    admin_enabled = connect.enabled if gated else bool(settings.admin_key)
     workspace = Workspace(github, settings.demo)
     devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
 
@@ -717,7 +737,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     basic = HTTPBasic(auto_error=False, realm="Bridge")
 
     async def authenticate(request: Request) -> None:
-        if not settings.admin_key:
+        if gated or not settings.admin_key:
             return
         auth = await basic(request)
         if (auth is None or auth.username != "bridge"
@@ -725,8 +745,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise HTTPException(401, "Войди в кабинет.", headers={"WWW-Authenticate": 'Basic realm="Bridge"'})
 
     def require_admin_enabled() -> None:
-        if not settings.admin_key:
-            raise HTTPException(403, "Включи защиту кабинета через BRIDGE_ADMIN_KEY на сервере.")
+        if not admin_enabled:
+            raise HTTPException(403, "Изменение доступно только в защищённом кабинете.")
 
     app = FastAPI(title="AntiG × Devin", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan,
                   dependencies=[Depends(authenticate)])
@@ -744,10 +764,19 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.middleware("http")
     async def protect(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        path = request.url.path
         if request.method == "POST" and request.headers.get("X-Bridge-Request") != "1":
             return JSONResponse({"detail": "Запрос должен быть отправлен из панели."}, status_code=403)
-        response = await call_next(request)
-        if request.url.path == "/api/github/callback":
+        public = path in PUBLIC_LOGIN_ROUTES or (settings.demo and path == "/api/demo/enter")
+        if gated and not public and not cabinet_access(request):
+            if path.startswith("/api/"):
+                response: Response = JSONResponse({"detail": "Войди через GitHub."}, status_code=401)
+            else:
+                target = "workspace" if path.startswith("/workspace/") else LOGIN_TARGETS.get(path, "overview")
+                response = RedirectResponse(login_url(target), status_code=303)
+        else:
+            response = await call_next(request)
+        if path == "/api/github/callback":
             request.scope["query_string"] = b""
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' https:; media-src 'self' https:; "
@@ -755,8 +784,27 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         )
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        if request.url.path.startswith("/api/"):
+        if gated or path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        return response
+
+    def cabinet_access(request: Request) -> bool:
+        if settings.demo:
+            return request.cookies.get(DEMO_COOKIE) == "1"
+        return connect.connection(request) is not None
+
+    @app.get("/login", response_model=None)
+    def login(request: Request, target: Destination = "overview") -> Response:
+        if gated and cabinet_access(request):
+            return RedirectResponse(DESTINATIONS[target], status_code=303)
+        return FileResponse(ROOT / "static" / "login.html")
+
+    @app.post("/api/demo/enter")
+    def enter_demo(request: Request, target: Destination = "overview") -> JSONResponse:
+        if not settings.demo:
+            raise HTTPException(404, "Демо не включено.")
+        response = JSONResponse({"path": DESTINATIONS[target]})
+        response.set_cookie(DEMO_COOKIE, "1", httponly=True, samesite="lax", secure=request.url.scheme == "https")
         return response
 
     @app.get("/")
@@ -798,7 +846,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             "grok_provider": selected_provider,
             "devin": bool(devin or settings.demo),
             "github_private": bool((connect.enabled or settings.github_read_token) and not settings.demo),
-            "can_manage": bool(settings.admin_key),
+            "can_manage": admin_enabled,
         }
 
     @app.get("/api/settings")
@@ -808,7 +856,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 "provider": selected_provider,
                 "keys": {provider: "runtime" if provider in runtime_keys else "environment" if key else "missing"
                          for provider, key in env_keys.items()},
-                "can_manage": bool(settings.admin_key),
+                "can_manage": admin_enabled,
                 "demo": settings.demo,
             }
 
@@ -869,7 +917,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         return public_job(store.get(job_id))
 
     def can_publish(repo: str) -> bool:
-        return bool(not settings.demo and settings.admin_key
+        return bool(not settings.demo and admin_enabled
                     and (connect.enabled or (git_writer.key and repo.lower() in settings.github_write_repos)))
 
     @app.post("/api/workspaces", status_code=201)

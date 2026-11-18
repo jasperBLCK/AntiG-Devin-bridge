@@ -26,7 +26,7 @@
     byId("reset-key").disabled = !current.can_manage || current.keys[provider()] !== "runtime";
     key.disabled = !current.can_manage;
     byId("settings-note").textContent = current.can_manage ? "" :
-      "Изменение отключено: задай на сервере BRIDGE_ADMIN_KEY, чтобы кабинет открывался по паролю (логин bridge).";
+      "Менять ключи можно только в защищённом кабинете.";
   }
 
   async function send(payload) {

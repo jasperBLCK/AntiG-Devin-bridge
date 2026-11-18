@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
-from app import Settings, create_app
+from app import DEMO_COOKIE, Settings, create_app
 from github_connect import GitHubApp
 
 ORIGIN = "https://bridge.example.com"
@@ -45,7 +45,7 @@ class GitHubConnectTests(unittest.TestCase):
             return {"access_token": TOKEN, "expires_in": 3600}
         self.assertEqual(key, TOKEN)
         if url.endswith("/user"):
-            return {"login": "bridge-user"}
+            return {"login": "bridge-user", "id": 42}
         if url.endswith("/user/installations?per_page=100&page=1"):
             return {"installations": [{"id": 10}]}
         if url.endswith("/user/installations/10/repositories?per_page=100&page=1"):
@@ -89,7 +89,7 @@ class GitHubConnectTests(unittest.TestCase):
             expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
             self.assertEqual(params["code_challenge"], [expected])
             self.assertEqual(client.get("/api/github/status").json(), {
-                "enabled": True, "login": "bridge-user",
+                "enabled": True, "demo": False, "login": "bridge-user",
                 "install": "https://github.com/apps/bridge-mock/installations/new",
             })
             self.assertIsNone(other.get("/api/github/status").json()["login"])
@@ -168,3 +168,60 @@ class GitHubConnectTests(unittest.TestCase):
             with self.subTest(settings=settings.github_app.origin), self.client(settings) as client:
                 self.assertFalse(client.get("/api/github/status").json()["enabled"])
                 self.assertEqual(client.post("/api/github/start?target=workspace", headers=WRITE).status_code, 503)
+
+    def test_github_gate_protects_pages_apis_even_when_setup_is_missing(self):
+        settings = replace(self.settings, github_login_required=True)
+        with self.client(settings) as client, patch("github_connect.request_json") as remote:
+            for path, target in (("/", "overview"), ("/workspace", "workspace"), ("/settings", "settings"),
+                                 ("/tasks/new", "task"), ("/sessions", "sessions"), ("/skills", "skills"),
+                                 ("/static/workspace.html", "overview")):
+                result = client.get(path)
+                self.assertEqual(result.status_code, 303, path)
+                self.assertEqual(result.headers["location"], f"/login?target={target}")
+            login = client.get("/login?target=workspace")
+            self.assertIn("Connect GitHub", login.text)
+            self.assertEqual(login.headers["cache-control"], "no-store")
+            self.assertEqual(client.get("/static/login.js").status_code, 200)
+            self.assertFalse(client.get("/api/github/status").json()["enabled"])
+            self.assertEqual(client.post("/api/github/start?target=workspace", headers=WRITE).status_code, 503)
+            client.cookies.set(DEMO_COOKIE, "1")
+            self.assertEqual(client.get("/api/jobs").status_code, 401)
+            self.assertEqual(client.get("/api/github/repos").status_code, 401)
+            self.assertEqual(client.post("/api/demo/enter", headers=WRITE).status_code, 401)
+            self.assertIn("/login", client.get("/api/github/setup?installation_id=7").headers["location"])
+            remote.assert_not_called()
+
+    def test_owner_id_unlocks_cabinet_without_basic_and_logout_closes_it(self):
+        settings = replace(self.settings, github_login_required=True, github_app=replace(APP, owner_id=42), admin_key="")
+        with self.client(settings) as client, patch("github_connect.request_json", side_effect=self.github):
+            self.assertEqual(client.get("/api/settings").status_code, 401)
+            self.assertEqual(self.authorize(client, self.start(client)).headers["location"], "/workspace?github=connected")
+            self.assertEqual(client.get("/workspace").status_code, 200)
+            self.assertTrue(client.get("/api/settings").json()["can_manage"])
+            self.assertEqual(client.get("/login?target=workspace").headers["location"], "/workspace")
+            self.assertEqual(client.post("/api/github/disconnect", headers=WRITE).status_code, 200)
+            self.assertEqual(client.get("/workspace").headers["location"], "/login?target=workspace")
+            self.assertEqual(client.get("/api/settings").status_code, 401)
+
+    def test_another_github_account_cannot_get_a_cabinet_session(self):
+        settings = replace(self.settings, github_login_required=True, github_app=replace(APP, owner_id=43), admin_key="")
+        with self.client(settings) as client, patch("github_connect.request_json", side_effect=self.github):
+            result = self.authorize(client, self.start(client))
+            self.assertEqual(result.headers["location"], "/login?target=workspace&github=denied")
+            self.assertIsNone(client.get("/api/github/status").json()["login"])
+            self.assertEqual(client.get("/api/overview").status_code, 401)
+
+    def test_demo_entry_cannot_manage_real_keys_and_never_starts_oauth(self):
+        settings = replace(self.settings, github_login_required=True, demo=True)
+        with self.client(settings) as client, patch("github_connect.request_json") as remote:
+            client.auth = None
+            self.assertEqual(client.get("/workspace").headers["location"], "/login?target=workspace")
+            self.assertEqual(client.get("/api/github/status").json(),
+                             {"enabled": False, "demo": True, "login": None, "install": None})
+            self.assertEqual(client.post("/api/demo/enter?target=workspace").status_code, 403)
+            response = client.post("/api/demo/enter?target=workspace", headers=WRITE)
+            self.assertEqual(response.json(), {"path": "/workspace"})
+            self.assertEqual(client.get("/workspace").status_code, 200)
+            self.assertFalse(client.get("/api/settings").json()["can_manage"])
+            self.assertEqual(client.post("/api/github/start?target=workspace", headers=WRITE).status_code, 503)
+            remote.assert_not_called()

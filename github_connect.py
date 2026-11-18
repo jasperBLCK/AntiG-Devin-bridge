@@ -19,7 +19,18 @@ from repository import GITHUB_HEADERS, GitHub, valid_repo
 SESSION = "bridge_github"
 OAUTH = "bridge_github_oauth"
 API = "https://api.github.com"
-DESTINATIONS = {"overview": "/", "workspace": "/workspace", "settings": "/settings", "task": "/tasks/new"}
+Destination = Literal["overview", "workspace", "settings", "task", "sessions", "skills"]
+DESTINATIONS: dict[Destination, str] = {
+    "overview": "/", "workspace": "/workspace", "settings": "/settings", "task": "/tasks/new",
+    "sessions": "/sessions", "skills": "/skills",
+}
+
+
+def login_url(target: Destination, notice: str | None = None) -> str:
+    params: dict[str, str] = {"target": target}
+    if notice:
+        params["github"] = notice
+    return "/login?" + urlencode(params)
 
 
 @dataclass(frozen=True)
@@ -28,6 +39,7 @@ class GitHubApp:
     client_id: str = ""
     client_secret: str = field(default="", repr=False)
     origin: str = ""
+    owner_id: int = 0
 
     @property
     def configured(self) -> bool:
@@ -52,7 +64,7 @@ class GitHubApp:
 class Pending:
     state: str
     verifier: str = field(repr=False)
-    destination: str
+    destination: Destination
     expires: float
 
 
@@ -67,9 +79,11 @@ class Connection:
 
 
 class GitHubConnect:
-    def __init__(self, config: GitHubApp, enabled: bool) -> None:
+    def __init__(self, config: GitHubApp, enabled: bool, *, gated: bool, demo: bool) -> None:
         self.config = config
-        self.enabled = enabled and config.configured
+        self.enabled = enabled and not demo and config.configured
+        self.gated = gated
+        self.demo = demo
         self.secure = config.origin.startswith("https://")
         self.pending: dict[str, Pending] = {}
         self.sessions: dict[str, Connection] = {}
@@ -154,11 +168,11 @@ class GitHubConnect:
         @router.get("/status")
         def status(request: Request) -> dict[str, Any]:
             session = self.connection(request)
-            return {"enabled": self.enabled, "login": session.login if session else None,
+            return {"enabled": self.enabled, "demo": self.demo, "login": session.login if session else None,
                     "install": f"https://github.com/apps/{self.config.slug}/installations/new" if session else None}
 
         @router.post("/start")
-        def start(request: Request, target: Literal["overview", "workspace", "settings", "task"]) -> JSONResponse:
+        def start(request: Request, target: Destination) -> JSONResponse:
             if not self.enabled:
                 raise HTTPException(503, "GitHub App ещё не настроен на сервере.")
             ticket, state, verifier = (secrets.token_urlsafe(32) for _ in range(3))
@@ -167,7 +181,7 @@ class GitHubConnect:
                 self.pending.pop(request.cookies.get(OAUTH, ""), None)
                 if len(self.pending) >= 128:
                     raise HTTPException(429, "Слишком много попыток. Попробуй позже.")
-                self.pending[ticket] = Pending(state, verifier, DESTINATIONS[target], monotonic() + 600)
+                self.pending[ticket] = Pending(state, verifier, target, monotonic() + 600)
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
             query = urlencode({
                 "client_id": self.config.client_id, "redirect_uri": self.config.callback, "state": state,
@@ -187,7 +201,12 @@ class GitHubConnect:
                 if not flow or not secrets.compare_digest(state.encode(), flow.state.encode()):
                     raise HTTPException(400, "Ссылка на подключение устарела. Начни с кнопки GitHub в «Мосте».")
                 self.pending.pop(ticket)
-            response = RedirectResponse(flow.destination + "?github=cancelled", status_code=303)
+            destination = DESTINATIONS[flow.destination]
+
+            def failure(notice: str) -> str:
+                return login_url(flow.destination, notice) if self.gated else destination + "?github=" + notice
+
+            response = RedirectResponse(failure("cancelled"), status_code=303)
             self._cookie(response, OAUTH, "", 0)
             if not code or len(code) > 256 or "error" in request.query_params:
                 return response
@@ -199,11 +218,15 @@ class GitHubConnect:
                 token, ttl = data.get("access_token"), data.get("expires_in", 28800)
                 if not isinstance(token, str) or not token.startswith("ghu_") or type(ttl) is not int or ttl < 1:
                     raise ProviderError("GitHub не выдал пользовательский токен.")
-                login = self._api("/user", token).get("login")
+                user = self._api("/user", token)
+                login = user.get("login")
                 if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", login):
                     raise ProviderError("GitHub не вернул имя пользователя.")
             except ProviderError:
-                response.headers["Location"] = flow.destination + "?github=failed"
+                response.headers["Location"] = failure("failed")
+                return response
+            if self.config.owner_id and (type(user.get("id")) is not int or user["id"] != self.config.owner_id):
+                response.headers["Location"] = failure("denied")
                 return response
             ttl = min(ttl, 28800)
             session_id = secrets.token_urlsafe(32)
@@ -212,7 +235,7 @@ class GitHubConnect:
                 if len(self.sessions) >= 128:
                     self.sessions.pop(next(iter(self.sessions)))
                 self.sessions[session_id] = Connection(token, login, monotonic() + ttl)
-            response.headers["Location"] = flow.destination + "?github=connected"
+            response.headers["Location"] = destination + "?github=connected"
             self._cookie(response, SESSION, session_id, ttl)
             return response
 
@@ -222,6 +245,8 @@ class GitHubConnect:
             if (session := self.connection(request)) is not None:
                 with self.lock:
                     session.checked_until = 0
+            elif self.gated:
+                return RedirectResponse(login_url("workspace"), status_code=303)
             return RedirectResponse("/workspace?github=setup", status_code=303)
 
         @router.get("/repos")

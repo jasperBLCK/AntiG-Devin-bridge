@@ -13,7 +13,7 @@ $env:BRIDGE_MODE = 'demo'
 .\.venv\Scripts\python.exe -m uvicorn app:app
 ```
 
-Открой `http://127.0.0.1:8000`. В демо ключи не нужны, внешних запросов нет. На Linux создай окружение через `python3 -m venv .venv`, используй `.venv/bin/python` и выставь `export BRIDGE_MODE=demo`.
+Открой `http://127.0.0.1:8000` и нажми **Открыть демо** на экране входа. В демо ключи не нужны, агенты не запускаются. На Linux создай окружение через `python3 -m venv .venv`, используй `.venv/bin/python` и выставь `export BRIDGE_MODE=demo`.
 
 ## Реальные задачи
 
@@ -24,8 +24,8 @@ $env:BRIDGE_MODE = 'demo'
 | `ANTIG_API_KEY` | Ключ AntiG для Grok и Imagine |
 | `DEVIN_API_KEY` | [PAT или ключ сервисного пользователя](https://docs.devin.ai/api-reference/overview) с доступом к сессиям организации |
 | `DEVIN_ORG_ID` | Идентификатор организации Devin с префиксом `org-` |
-| `GITHUB_READ_TOKEN` | Запасной вариант без GitHub App: fine-grained PAT с **Contents: Read**, **Pull requests: Read** |
-| `GITHUB_WRITE_TOKEN` | Запасной вариант без GitHub App: fine-grained PAT с **Contents: Read and write** |
+| `GITHUB_READ_TOKEN` | В старом режиме: fine-grained PAT с **Contents: Read**, **Pull requests: Read** |
+| `GITHUB_WRITE_TOKEN` | В старом режиме: fine-grained PAT с **Contents: Read and write** |
 | `BRIDGE_GITHUB_WRITE_REPOS` | Репозитории для записи через PAT, через запятую. Запись требует `BRIDGE_ADMIN_KEY`. |
 | `BRIDGE_MEDIA_HOSTS` | Дополнительные доверенные хосты выдачи Grok Imagine через запятую (без URL и wildcard). |
 
@@ -35,10 +35,12 @@ $env:BRIDGE_MODE = 'demo'
 
 1. [Зарегистрируй GitHub App](https://github.com/settings/apps/new). **Homepage URL** — адрес «Моста» (HTTPS, без пути); **Callback URL** — тот же адрес с `/api/github/callback`; **Setup URL** — с `/api/github/setup`. Отключи **Request user authorization (OAuth) during installation**: «Мост» сам начинает вход с PKCE. Отключи **Webhook → Active**. Для локального запуска можно использовать `http://127.0.0.1:8000`.
 2. В **Repository permissions** задай **Contents: Read and write** для чтения и публикации веток, **Pull requests: Read-only** для просмотра PR. GitHub автоматически добавит **Metadata: Read-only**. Не нужны ключ GitHub App, права на Actions, секреты или администрирование.
-3. На сервере задай `BRIDGE_ADMIN_KEY`, `BRIDGE_GITHUB_APP_SLUG` (часть URL после `/apps/`), `BRIDGE_GITHUB_CLIENT_ID`, `BRIDGE_GITHUB_CLIENT_SECRET` и `BRIDGE_PUBLIC_ORIGIN` (тот же адрес). Client Secret сгенерируй в настройках GitHub App, храни только на сервере. Используй один процесс и этот же адрес в браузере. Не записывай query-строки OAuth callback в логи прокси.
-4. Открой «Мост» → **Подключить GitHub** → подтверди вход на github.com. Нажми **Выбрать репозитории на GitHub**, установи App на выбранные репозитории и вернись в IDE. Для уже установленного App список подгрузится сразу. Для организационного репозитория может понадобиться одобрение владельца организации.
+3. На сервере задай `BRIDGE_GITHUB_APP_SLUG` (часть URL после `/apps/`), `BRIDGE_GITHUB_CLIENT_ID`, `BRIDGE_GITHUB_CLIENT_SECRET`, `BRIDGE_PUBLIC_ORIGIN` (тот же адрес) и `BRIDGE_GITHUB_OWNER_ID` (числовое поле `id` владельца из `https://api.github.com/users/ИМЯ`). Client Secret сгенерируй в настройках GitHub App и храни только на сервере. Используй один процесс и этот же адрес в браузере. Не записывай query-строки OAuth callback в логи прокси.
+4. Открой «Мост» → **Connect GitHub** → подтверди вход на github.com. Кабинет доступен только указанному аккаунту. Нажми **Выбрать репозитории на GitHub**, установи App на выбранные репозитории и вернись в IDE. Для уже установленного App список подгрузится сразу. Для организационного репозитория может понадобиться одобрение владельца организации.
 
-Когда GitHub App включён, серверные PAT не используются для доступа к репозиториям. Подключение хранится в памяти процесса до перезапуска или истечения токена (не дольше 8 часов); затем войди снова. Отключение в «Мосте» удаляет локальное подключение; доступ GitHub можно отозвать в его настройках. Это не заменяет отдельную интеграцию GitHub в Devin. В демо OAuth выключен.
+По умолчанию до входа закрыты и страницы, и API. Пароль `BRIDGE_ADMIN_KEY` в режиме GitHub-входа не нужен. Подключение хранится в памяти процесса до перезапуска или истечения токена (не дольше 8 часов). Отключение в «Мосте» закрывает кабинет; доступ GitHub можно отозвать в его настройках. Это не заменяет отдельную интеграцию GitHub в Devin.
+
+Если нужен старый режим с доступом по паролю и серверными PAT, явно задай `BRIDGE_REQUIRE_GITHUB_LOGIN=0` и `BRIDGE_ADMIN_KEY`. В режиме GitHub-входа PAT не используются. Кнопка **Открыть демо** есть только на сервере, запущенном с `BRIDGE_MODE=demo`, и не даёт доступа к рабочему кабинету.
 
 **Проект с фото и видео.** В одном запросе укажи, какие медиа нужно сгенерировать для проекта. «Мост» покажет предложенные запросы под задачей. После подтверждения Grok Imagine создаёт файлы, и «Мост» прикрепляет их к одной сессии Devin через API вложений. При сбое запуска или передачи не повторяет платный запрос автоматически. Демо ничего не генерирует и не отправляет наружу. Используй только доверенные хосты загрузки; поддерживаются JPEG, PNG, WebP и MP4 до 20 МиБ на файл.
 
