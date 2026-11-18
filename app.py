@@ -9,7 +9,7 @@ import secrets
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -25,6 +25,7 @@ from fastapi.security import HTTPBasic
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
+from github_connect import GitHubApp, GitHubConnect
 from orchestration import (
     DEVIN_ROUTES,
     MEDIA_MODELS,
@@ -94,6 +95,7 @@ class Settings:
     github_write_token: str = ""
     github_write_repos: tuple[str, ...] = ()
     media_hosts: tuple[str, ...] = DEFAULT_MEDIA_HOSTS
+    github_app: GitHubApp = field(default_factory=GitHubApp)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -114,6 +116,10 @@ class Settings:
                                      if valid_repo(repo.strip())),
             media_hosts=DEFAULT_MEDIA_HOSTS + tuple(host.strip().lower() for host in os.getenv("BRIDGE_MEDIA_HOSTS", "").split(",")
                                                    if re.fullmatch(r"[a-zA-Z0-9.-]+", host.strip())),
+            github_app=GitHubApp(os.getenv("BRIDGE_GITHUB_APP_SLUG", "").strip(),
+                                 os.getenv("BRIDGE_GITHUB_CLIENT_ID", "").strip(),
+                                 os.getenv("BRIDGE_GITHUB_CLIENT_SECRET", "").strip(),
+                                 os.getenv("BRIDGE_PUBLIC_ORIGIN", "").strip().rstrip("/")),
         )
 
 
@@ -378,8 +384,12 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     github = GitHub(settings.github_read_token)
     git_writer = GitHub(settings.github_write_token)
+    connect = GitHubConnect(settings.github_app, not settings.demo and bool(settings.admin_key))
     workspace = Workspace(github, settings.demo)
     devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
+
+    def github_for(request: Request, repo: str) -> GitHub:
+        return connect.client(request, repo) if connect.enabled else github
 
     polling: set[str] = set()
     poll_lock = Lock()
@@ -387,17 +397,18 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def redact(text: str) -> str:
         with keys_lock:
             keys = (*env_keys.values(), *runtime_keys.values(), settings.admin_key,
-                    settings.devin_key, settings.github_read_token, settings.github_write_token)
+                    settings.devin_key, settings.github_read_token, settings.github_write_token,
+                    settings.github_app.client_secret)
         for secret in keys:
             if secret:
                 text = text.replace(secret, "[скрыто]")
         return re.sub(r"\b(?:ag_|xai-|gh[pousr]_|github_pat_)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
 
-    def read_files(repo: str, commit: str, paths: list[str]) -> list[dict[str, str]]:
+    def read_files(repo: str, commit: str, paths: list[str], client: GitHub) -> list[dict[str, str]]:
         if len(set(paths)) != len(paths) or not all(map(shareable_path, paths)):
             raise ProviderError("Выбери разные текстовые файлы без секретов.")
         try:
-            files = [{"path": path, "text": DEMO_FILES[path] if settings.demo else github.file(repo, commit, path)}
+            files = [{"path": path, "text": DEMO_FILES[path] if settings.demo else client.file(repo, commit, path)}
                      for path in paths]
         except KeyError:
             raise ProviderError("Файл не найден в демо.") from None
@@ -424,9 +435,9 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             result["status"] = "running"
         return result
 
-    def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]], grok: AntiG) -> None:
+    def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]], grok: AntiG, client: GitHub) -> None:
         try:
-            files = read_files(task.repo, task.context.commit, task.context.paths) if task.repo and task.context else []
+            files = read_files(task.repo, task.context.commit, task.context.paths, client) if task.repo and task.context else []
             context = json.dumps({
                 "request": redact(task.prompt), "repository": task.repo, "base_ref": task.ref,
                 "commit": task.context.commit if task.context else None,
@@ -599,7 +610,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         except ProviderError as exc:
             activity["warnings"].append(f"Сообщения Devin временно недоступны: {exc}")
         pr_url = update.get("pr_url")
-        if pr_url and job["repo"] and (
+        if not connect.enabled and pr_url and job["repo"] and (
             update["status"] == "ended" or activity.get("pr_url") != pr_url or time() - activity.get("pr_checked", 0) >= 60
         ):
             activity["pr_checked"] = time()
@@ -721,6 +732,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                   dependencies=[Depends(authenticate)])
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
     app.include_router(skills.routes(redact))
+    app.include_router(connect.routes())
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc: RequestValidationError) -> Response:
@@ -735,6 +747,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if request.method == "POST" and request.headers.get("X-Bridge-Request") != "1":
             return JSONResponse({"detail": "Запрос должен быть отправлен из панели."}, status_code=403)
         response = await call_next(request)
+        if request.url.path == "/api/github/callback":
+            request.scope["query_string"] = b""
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' https:; media-src 'self' https:; "
             "base-uri 'none'; object-src 'none'; form-action 'none'"
@@ -783,7 +797,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             "grok": bool(grok.key or settings.demo),
             "grok_provider": selected_provider,
             "devin": bool(devin or settings.demo),
-            "github_private": bool(settings.github_read_token and not settings.demo),
+            "github_private": bool((connect.enabled or settings.github_read_token) and not settings.demo),
             "can_manage": bool(settings.admin_key),
         }
 
@@ -855,29 +869,31 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         return public_job(store.get(job_id))
 
     def can_publish(repo: str) -> bool:
-        return bool(not settings.demo and settings.admin_key and git_writer.key
-                    and repo.lower() in settings.github_write_repos)
+        return bool(not settings.demo and settings.admin_key
+                    and (connect.enabled or (git_writer.key and repo.lower() in settings.github_write_repos)))
 
     @app.post("/api/workspaces", status_code=201)
-    def open_workspace(target: RepoBrowse) -> dict[str, str]:
+    def open_workspace(target: RepoBrowse, request: Request) -> dict[str, str]:
         if not valid_repo(target.repo):
             raise HTTPException(422, "Укажи репозиторий в формате владелец/репозиторий.")
         try:
             tree = workspace.tree({"id": "", "repo": target.repo, "ref": target.ref,
-                                   "commit_sha": None, "pr_url": None}, "base")
+                                   "commit_sha": None, "pr_url": None}, "base", github_for(request, target.repo))
         except ProviderError as exc:
             raise HTTPException(502, f"GitHub: {exc}") from None
         return {"id": store.open_workspace(tree["repo"], tree["ref"], tree["commit"])}
 
     @app.get("/api/jobs/{job_id}/workspace/tree")
-    def workspace_tree(job_id: JobID, revision: Revision = "base") -> dict[str, Any]:
+    def workspace_tree(job_id: JobID, request: Request, revision: Revision = "base") -> dict[str, Any]:
         current = store.get(job_id)
         if not current["repo"]:
             raise HTTPException(422, "К этой задаче не привязан GitHub-репозиторий.")
         if revision == "pr" and not current["pr_url"]:
             raise HTTPException(404, "У задачи пока нет PR.")
         try:
-            return {**workspace.tree(current, revision),
+            client = github_for(request, current["repo"])
+            return {**workspace.tree(current, revision, client,
+                                     (lambda repo: github_for(request, repo)) if connect.enabled else None),
                     "can_publish": revision == "base" and can_publish(current["repo"]),
                     "demo": settings.demo}
         except ProviderError as exc:
@@ -885,25 +901,27 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/workspace/file")
     def workspace_file(
-        job_id: JobID, repo: Repo, commit: Commit, path: SourcePath, blob: Commit, stamp: FileStamp,
+        job_id: JobID, request: Request, repo: Repo, commit: Commit, path: SourcePath, blob: Commit, stamp: FileStamp,
     ) -> dict[str, Any]:
         current = store.get(job_id)
         if not current["repo"] or not workspace.allowed(job_id, repo, commit, path, blob, stamp):
             raise HTTPException(409, "Файл не относится к открытому снимку. Обнови дерево.")
         try:
-            original = workspace.file(repo, path, blob)
+            original = workspace.file(repo, path, blob, github_for(request, repo))
             text = redact(original)
             return {"path": path, "text": text, "editable": original == text and editable_path(path)}
         except ProviderError as exc:
             raise HTTPException(422, str(exc)) from None
 
     @app.post("/api/jobs/{job_id}/workspace/publish", status_code=201)
-    def publish_workspace(job_id: JobID, change: WorkspacePublish) -> dict[str, str]:
+    def publish_workspace(job_id: JobID, change: WorkspacePublish, request: Request) -> dict[str, str]:
         require_admin_enabled()
         current = store.get(job_id)
         repo = current["repo"]
         if not repo or not can_publish(repo):
             raise HTTPException(403, "Публикация не настроена для этого репозитория.")
+        client = github_for(request, repo)
+        writer = client if connect.enabled else git_writer
         paths = {item.path for item in change.edits}
         if (len(paths) != len(change.edits) or not all(map(editable_path, paths))
                 or any(ord(char) < 32 or ord(char) == 127 for char in change.message)
@@ -918,7 +936,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if not all(workspace.allowed(job_id, repo, change.commit, e.path, e.blob, e.stamp) for e in change.edits):
             raise HTTPException(409, "Файл не относится к снимку. Обнови проводник перед публикацией.")
         try:
-            tree = github.tree(repo, current["commit_sha"] or current["ref"], workspace=True)
+            tree = client.tree(repo, current["commit_sha"] or current["ref"], workspace=True)
             if tree["commit"] != change.commit:
                 raise HTTPException(409, "Исходная ветка изменилась. Сохрани правки и открой свежий снимок.")
             snapshot = {entry["path"]: entry for entry in tree["files"]}
@@ -927,35 +945,35 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 file = snapshot.get(item.path)
                 if not file or file["blob"] != item.blob:
                     raise HTTPException(409, "Исходный файл изменился. Обнови проводник.")
-                original = github.blob(repo, item.blob)
+                original = client.blob(repo, item.blob)
                 if redact(original) != original:
                     raise HTTPException(422, "Нельзя публиковать файл со скрытыми участками.")
                 if original != item.text:
                     edits.append({"path": item.path, "mode": file["mode"], "type": "blob", "content": item.text})
             if not edits:
                 raise HTTPException(422, "Нет изменений для коммита.")
-            return git_writer.publish_branch(repo, change.commit, tree["tree_sha"], f"bridge/{uuid4().hex}",
-                                             change.message, edits)
+            return writer.publish_branch(repo, change.commit, tree["tree_sha"], f"bridge/{uuid4().hex}",
+                                         change.message, edits)
         except ProviderError as exc:
             raise HTTPException(502, f"GitHub: {exc}") from None
 
     @app.post("/api/repo/tree")
-    def repo_tree(target: RepoBrowse) -> dict[str, Any]:
+    def repo_tree(target: RepoBrowse, request: Request) -> dict[str, Any]:
         if settings.demo:
             return {"repo": target.repo, "ref": target.ref or "main", "commit": "0" * 40,
                     "paths": list(DEMO_FILES), "truncated": False}
         try:
-            return github.tree(target.repo, target.ref)
+            return github_for(request, target.repo).tree(target.repo, target.ref)
         except ProviderError as exc:
             raise HTTPException(502, f"GitHub: {exc}") from None
 
     @app.post("/api/repo/preview")
-    def repo_preview(target: RepoPreview) -> dict[str, Any]:
+    def repo_preview(target: RepoPreview, request: Request) -> dict[str, Any]:
         try:
-            files = read_files(target.repo, target.commit, target.paths)
+            files = read_files(target.repo, target.commit, target.paths, github_for(request, target.repo))
         except ProviderError as exc:
             raise HTTPException(422, str(exc)) from None
-        return {"commit": target.commit, "files": files}
+        return {"commit": target.commit, "files": [{**file, "text": redact(file["text"])} for file in files]}
 
     @app.post("/api/jobs", status_code=202)
     def submit(task: Submission, background: BackgroundTasks, request: Request) -> dict[str, Any]:
@@ -976,9 +994,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                              or not all(map(shareable_path, task.context.paths))):
             raise HTTPException(422, "Для контекста укажи ветку и разные файлы без секретов.")
         task.prompt = redact(task.prompt)
+        client = github_for(request, task.repo) if task.repo else github
         recipes = skills.task_skills(skills.browser(request), task.skill_ids)
         current = store.insert(task, recipes, provider)
-        background.add_task(dispatch, current["id"], task, recipes, grok)
+        background.add_task(dispatch, current["id"], task, recipes, grok, client)
         return public_job(current)
 
     @app.post("/api/jobs/{job_id}/generate", status_code=202)

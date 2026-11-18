@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/settings.js" defer></script>
+  <script src="/static/github-connect.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">К содержимому</a>
@@ -38,6 +39,19 @@
     </header>
     <noscript>Включи JavaScript, чтобы изменить настройки.</noscript>
     <div class="settings-layout">
+      <section class="panel settings-card" aria-labelledby="github-title">
+        <div class="panel-header"><h2 id="github-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg>GitHub</h2></div>
+        <div class="settings-body" data-github-connect="settings">
+          <p data-github-message role="status">Проверяю GitHub…</p>
+          <p class="muted">Выбирай на GitHub, к каким репозиториям дать доступ. Сама сессия Devin использует своё подключение.</p>
+          <div class="github-connect">
+            <button type="button" class="quiet" data-github-sign-in hidden>Подключить GitHub</button>
+            <a class="action-link" data-github-install hidden>Выбрать репозитории на GitHub</a>
+            <a class="action-link" href="https://github.com/settings/installations" data-github-manage hidden>Управлять доступом</a>
+            <button type="button" class="quiet" data-github-disconnect hidden>Отключить в «Мосте»</button>
+          </div>
+        </div>
+      </section>
       <section class="panel settings-card" aria-labelledby="keys-title">
         <div class="panel-header"><h2 id="keys-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Ключи Grok</h2></div>
         <form id="settings-form">

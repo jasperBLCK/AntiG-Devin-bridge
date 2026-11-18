@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/static/marketplace.css">
   <script src="/static/marketplace.js" defer></script>
   <script src="/static/workspace.js" defer></script>
+  <script src="/static/github-connect.js" defer></script>
 </head>
 <body data-explorer="true">
   <header class="top">
@@ -28,6 +29,13 @@
       <div class="entry-mark"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#code"/></svg> BRIDGE WORKSPACE</div>
       <h1>От репозитория<br>к коммиту<span>.</span></h1>
       <p>Открой снимок из GitHub, поправь код и проверь изменения перед публикацией. Агенты не запускаются.</p>
+      <div class="entry-github" data-github-connect="workspace" data-github-input="workspace-repo">
+        <p class="dim" data-github-message role="status">Проверяю GitHub…</p>
+        <button type="button" class="ide-button" data-github-sign-in hidden>Подключить GitHub</button>
+        <a class="ide-button" data-github-install hidden>Выбрать репозитории на GitHub</a>
+        <button type="button" class="ide-button" data-github-reload hidden>Обновить список</button>
+        <select data-github-repos aria-label="Доступные репозитории GitHub" hidden></select>
+      </div>
       <form id="open-workspace-form">
         <label>Репозиторий GitHub<input id="workspace-repo" required maxlength="200" placeholder="владелец/репозиторий" spellcheck="false"></label>
         <label>Ветка или SHA <span class="dim">· необязательно</span><input id="workspace-ref" maxlength="200" placeholder="Ветка по умолчанию" spellcheck="false"></label>

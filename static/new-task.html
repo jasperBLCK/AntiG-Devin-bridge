@@ -8,6 +8,7 @@
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/github-connect.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">К содержимому</a>
@@ -42,6 +43,13 @@
           <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: исправь импорт пустого CSV и добавь регрессионный тест"></textarea>
           <p class="muted">Нужны фото или видео для проекта? Опиши их здесь. Генерацию можно подтвердить в той же задаче.</p>
           <div id="project-fields" class="project-fields">
+            <div class="github-connect" data-github-connect="task" data-github-input="repo">
+              <p class="muted" data-github-message role="status">Проверяю GitHub…</p>
+              <button type="button" class="quiet" data-github-sign-in hidden>Подключить GitHub</button>
+              <a class="action-link" data-github-install hidden>Выбрать репозитории на GitHub</a>
+              <button type="button" class="quiet" data-github-reload hidden>Обновить список</button>
+              <select data-github-repos aria-label="Доступные репозитории GitHub" hidden></select>
+            </div>
             <div class="project-inputs">
               <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
               <div><label for="git-ref">Ветка или тег</label><input id="git-ref" name="git-ref" placeholder="По умолчанию" maxlength="200"></div>

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Callable
 from typing import Any, Literal
 
 from providers import ProviderError
@@ -26,13 +27,17 @@ class Workspace:
         data = json.dumps([job_id, repo, commit, path, blob], ensure_ascii=False).encode()
         return hmac.digest(self._key, data, "sha256").hex()
 
-    def tree(self, job: dict[str, Any], revision: Revision) -> dict[str, Any]:
+    def tree(self, job: dict[str, Any], revision: Revision, client: GitHub | None = None,
+             fork_client: Callable[[str], GitHub] | None = None) -> dict[str, Any]:
+        github = client or self.github
         repo, pr = job["repo"], job["pr_url"]
         if revision == "pr" and (not pr or self.demo):
             raise ProviderError("У задачи пока нет доступной ветки PR.")
         ref, pinned = job["ref"], job["commit_sha"]
         if revision == "pr":
-            repo, pinned, ref = self.github.pull_head(repo, pr)
+            repo, pinned, ref = github.pull_head(repo, pr)
+            if fork_client and repo.lower() != job["repo"].lower():
+                github = fork_client(repo)
         if self.demo:
             result: dict[str, Any] = {
                 "repo": repo, "ref": ref or "main", "commit": pinned or "0" * 40, "truncated": False,
@@ -42,7 +47,7 @@ class Workspace:
                 ],
             }
         else:
-            result = self.github.tree(repo, pinned or ref, workspace=True)
+            result = github.tree(repo, pinned or ref, workspace=True)
             if pinned:
                 result["ref"] = ref or pinned[:8]
         files = []
@@ -58,5 +63,5 @@ class Workspace:
     def allowed(self, job_id: str, repo: str, commit: str, path: str, blob: str, stamp: str) -> bool:
         return hmac.compare_digest(stamp, self._stamp(job_id, repo, commit, path, blob))
 
-    def file(self, repo: str, path: str, blob: str) -> str:
-        return DEMO_FILES[path] if self.demo else self.github.blob(repo, blob)
+    def file(self, repo: str, path: str, blob: str, client: GitHub | None = None) -> str:
+        return DEMO_FILES[path] if self.demo else (client or self.github).blob(repo, blob)

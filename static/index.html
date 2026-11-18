@@ -8,6 +8,7 @@
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/github-connect.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">К содержимому</a>
@@ -40,6 +41,11 @@
         <div class="hero-actions">
           <a class="action-link primary" href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
           <a class="action-link" href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Маркетплейс</a>
+        </div>
+        <div class="github-connect" data-github-connect="overview">
+          <p class="muted" data-github-message role="status">Проверяю GitHub…</p>
+          <button type="button" class="quiet" data-github-sign-in hidden>Подключить GitHub</button>
+          <a href="/workspace" class="action-link" data-github-install hidden>Выбрать репозитории</a>
         </div>
       </div>
       <div class="hero-art" aria-hidden="true">

@@ -72,7 +72,7 @@ def collect_chat_stream(raw: bytes) -> dict[str, Any]:
 
 def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
                  stream_model: str = "", headers: dict[str, str] | None = None,
-                 list_items: bool = False, limit: int = 4_000_000) -> dict[str, Any]:
+                 list_items: bool = False, limit: int = 4_000_000, form: bool = False) -> dict[str, Any]:
     request_headers = {"Accept": "application/json", **(headers or {})}
     if key:
         request_headers["Authorization"] = f"Bearer {key}"
@@ -82,8 +82,8 @@ def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
         if urlsplit(url).hostname == "grok.antig.ru":
             req.add_header("x-grok-model-override", stream_model)
     if payload is not None:
-        req.add_header("Content-Type", "application/json")
-        req.data = json.dumps(payload).encode()
+        req.add_header("Content-Type", "application/x-www-form-urlencoded" if form else "application/json")
+        req.data = (urlencode(payload) if form else json.dumps(payload)).encode()
     try:
         with build_opener(NoRedirect()).open(req, timeout=120 if payload is not None else 15) as response:
             event_stream = response.headers.get_content_type() == "text/event-stream"
