@@ -12,6 +12,8 @@ from providers import ProviderError, request_json
 MAX_FILES = 6
 MAX_FILE_BYTES = 16_000
 MAX_CONTEXT_CHARS = 36_000
+MAX_WORKSPACE_BYTES = 128 * 1024
+MAX_WORKSPACE_PATHS = 4000
 
 GITHUB_HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "AntiG-Devin-bridge"}
 
@@ -20,6 +22,12 @@ def sha(value: Any) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{40}", value):
         raise ProviderError("GitHub не вернул корректный SHA.")
     return value
+
+
+def valid_repo(repo: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)) and all(
+        part not in {".", ".."} for part in repo.split("/")
+    )
 
 
 def shareable_path(path: str) -> bool:
@@ -42,11 +50,11 @@ class GitHub:
         self.key = key
 
     def _read(self, repo: str, endpoint: str) -> dict[str, Any]:
-        if any(part in {".", ".."} for part in repo.split("/")):
+        if not valid_repo(repo):
             raise ProviderError("Укажи репозиторий в формате владелец/репозиторий.")
         return request_json(f"https://api.github.com/repos/{repo}{endpoint}", self.key, headers=GITHUB_HEADERS)
 
-    def tree(self, repo: str, ref: str | None) -> dict[str, Any]:
+    def tree(self, repo: str, ref: str | None, *, workspace: bool = False) -> dict[str, Any]:
         target = ref or self._read(repo, "").get("default_branch")
         if not isinstance(target, str) or not target or any(part in {".", ".."} for part in target.split("/")):
             raise ProviderError("Не удалось определить ветку GitHub.")
@@ -59,38 +67,75 @@ class GitHub:
         files = tree.get("tree")
         if not isinstance(files, list):
             raise ProviderError("GitHub не вернул дерево файлов.")
-        found = []
+        found: list[dict[str, Any]] = []
         for item in files:
             if not isinstance(item, dict) or item.get("type") != "blob" or item.get("mode") not in {"100644", "100755"}:
                 continue
             path, size = item.get("path"), item.get("size")
-            if isinstance(path, str) and shareable_path(path) and type(size) is int and 0 < size <= MAX_FILE_BYTES:
-                found.append(path)
-        found.sort(key=lambda path: (path.count("/"), path.lower()))
-        return {"repo": repo, "ref": target, "commit": commit_sha, "paths": found[:800],
-                "truncated": len(found) > 800 or bool(tree.get("truncated"))}
+            if not isinstance(path, str) or not shareable_path(path) or type(size) is not int or size < 0:
+                continue
+            if workspace:
+                found.append({"path": path, "size": size, "blob": sha(item.get("sha"))})
+            elif 0 < size <= MAX_FILE_BYTES:
+                found.append({"path": path})
+        found.sort(key=lambda entry: (entry["path"].count("/"), entry["path"].casefold(), entry["path"]))
+        limit = MAX_WORKSPACE_PATHS if workspace else 800
+        payload = {"files": found[:limit]} if workspace else {"paths": [item["path"] for item in found[:limit]]}
+        return {"repo": repo, "ref": target, "commit": commit_sha, **payload,
+                "truncated": len(found) > limit or bool(tree.get("truncated"))}
+
+    def blob(self, repo: str, blob: str) -> str:
+        obj = self._read(repo, f"/git/blobs/{sha(blob)}")
+        if obj.get("sha") != blob:
+            raise ProviderError("GitHub вернул другой файл.")
+        return self._text(obj, MAX_WORKSPACE_BYTES)
 
     def file(self, repo: str, commit: str, path: str) -> str:
         if not shareable_path(path):
             raise ProviderError("Файл нельзя передать в контекст.")
         obj = self._read(repo, f"/contents/{quote(path)}?ref={sha(commit)}")
+        if obj.get("type") != "file":
+            raise ProviderError(f"Выбери обычный текстовый файл: {path}")
+        return self._text(obj, MAX_FILE_BYTES)
+
+    @staticmethod
+    def _text(obj: dict[str, Any], limit: int) -> str:
         size, content = obj.get("size"), obj.get("content")
-        if (obj.get("type") != "file" or obj.get("encoding") != "base64"
-                or type(size) is not int or size > MAX_FILE_BYTES or not isinstance(content, str)):
-            raise ProviderError(f"Файл не является небольшим текстовым файлом: {path}")
+        if (obj.get("encoding") != "base64" or type(size) is not int or not 0 <= size <= limit
+                or not isinstance(content, str)):
+            raise ProviderError("Файл слишком большой или недоступен для просмотра текста.")
         try:
             decoded = base64.b64decode("".join(content.split()), validate=True)
-            if len(decoded) > MAX_FILE_BYTES or b"\0" in decoded:
+            if len(decoded) > limit or b"\0" in decoded:
                 raise ValueError
             return decoded.decode("utf-8")
         except (UnicodeError, binascii.Error, ValueError):
-            raise ProviderError(f"Файл должен быть текстом в UTF-8: {path}") from None
+            raise ProviderError("В редакторе можно открыть только текстовые файлы в UTF-8.") from None
 
-    def pull_request(self, repo: str, url: str) -> dict[str, Any]:
+    @staticmethod
+    def _pull_endpoint(repo: str, url: str) -> str:
         match = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9][0-9]{0,11})/?", url, re.ASCII)
         if not match or match[1].lower() != repo.lower():
             raise ProviderError("Ссылка на PR не относится к выбранному репозиторию.")
-        endpoint = f"/pulls/{match[2]}"
+        return f"/pulls/{match[2]}"
+
+    def pull_head(self, repo: str, url: str) -> tuple[str, str, str]:
+        pr = self._read(repo, self._pull_endpoint(repo, url))
+        head = pr.get("head")
+        if not isinstance(head, dict):
+            raise ProviderError("У PR нет доступной исходной ветки.")
+        source = head.get("repo")
+        source_repo = source.get("full_name") if isinstance(source, dict) else None
+        if source_repo is None:
+            source_repo = repo
+        if not isinstance(source_repo, str) or not valid_repo(source_repo):
+            raise ProviderError("GitHub вернул некорректный репозиторий PR.")
+        commit = sha(head.get("sha"))
+        label = head.get("label") or head.get("ref")
+        return source_repo, commit, str(label or commit[:8])[:250]
+
+    def pull_request(self, repo: str, url: str) -> dict[str, Any]:
+        endpoint = self._pull_endpoint(repo, url)
         pr = self._read(repo, endpoint)
         head, base = pr.get("head"), pr.get("base")
         if not isinstance(head, dict) or not isinstance(base, dict):
@@ -114,7 +159,45 @@ class GitHub:
 
 
 DEMO_FILES = {
-    "README.md": "# Demo project\nA small CSV importer. The first row contains the column names.\n",
-    "src/import_csv.py": "import csv\n\ndef import_rows(stream):\n    return list(csv.DictReader(stream))\n",
-    "tests/test_import.py": "def test_empty_upload():\n    # Add a regression test here.\n    pass\n",
+    "README.md": (
+        "# CSV Workbench\n\n"
+        "A small Python project that converts CSV uploads into rows of named fields.\n\n"
+        "## Project layout\n\n"
+        "- `src/import_csv.py` reads an upload.\n"
+        "- `src/validation.py` checks the columns.\n"
+        "- `tests/test_import.py` covers empty and valid uploads.\n\n"
+        "## Runtime\n\nPython 3.12 or later. No external dependencies.\n"
+    ),
+    "src/import_csv.py": (
+        "from __future__ import annotations\n\n"
+        "import csv\n"
+        "from typing import TextIO\n\n"
+        "from .validation import validate_columns\n\n\n"
+        "def import_rows(stream: TextIO) -> list[dict[str, str]]:\n"
+        '    """Read rows keyed by the CSV header."""\n'
+        "    reader = csv.DictReader(stream)\n"
+        "    if reader.fieldnames is None:\n"
+        "        return []\n\n"
+        "    validate_columns(reader.fieldnames)\n"
+        "    return [row for row in reader]\n"
+    ),
+    "src/validation.py": (
+        "def validate_columns(columns: list[str]) -> None:\n"
+        "    if any(not column.strip() for column in columns):\n"
+        '        raise ValueError("Column names cannot be blank")\n'
+        "    if len(set(columns)) != len(columns):\n"
+        '        raise ValueError("Column names must be unique")\n'
+    ),
+    "tests/test_import.py": (
+        "from io import StringIO\n\n"
+        "from src.import_csv import import_rows\n\n\n"
+        "def test_empty_upload():\n"
+        '    assert import_rows(StringIO("")) == []\n\n\n'
+        "def test_named_columns():\n"
+        '    stream = StringIO("item,quantity\\ncoffee,2\\n")\n'
+        '    assert import_rows(stream) == [{"item": "coffee", "quantity": "2"}]\n'
+    ),
+    "tests/fixtures/orders.csv": "item,quantity\ncoffee,2\ntea,1\n",
+    "docs/architecture.md": "# Import flow\n\nRead the header, validate the columns, then return the data rows.\n",
+    "pyproject.toml": '[project]\nname = "csv-workbench"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n',
 }

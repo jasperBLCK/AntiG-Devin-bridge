@@ -335,6 +335,11 @@ function showResult() {
   if (job.reason) root.append(element("p", job.reason));
   if (job.error) root.append(element("p", job.error, "error"));
   const actions = element("div", "", "result-actions");
+  if (job.repo) {
+    const workspace = element("a", "Открыть редактор", "action-link workspace-link");
+    workspace.href = "/workspace/" + job.id;
+    actions.append(workspace);
+  }
   if (job.session_url) actions.append(link("Открыть сессию Devin", job.session_url));
   if (job.pr_url) actions.append(link("Открыть PR", job.pr_url));
   if (job.media_url) actions.append(link("Открыть медиа", job.media_url));

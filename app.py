@@ -36,7 +36,9 @@ from repository import (
     MAX_FILES,
     GitHub,
     shareable_path,
+    valid_repo,
 )
+from workspace import Revision, Workspace
 
 ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
@@ -48,6 +50,7 @@ Prompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, m
 Repo = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=200)]
 JobID = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
 Commit = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{40}$")]
+FileStamp = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
 GitRef = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[A-Za-z0-9_./-]{1,200}$")]
 SourcePath = Annotated[str, StringConstraints(min_length=1, max_length=320)]
 
@@ -212,6 +215,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     store = Store(settings.db)
     antig = AntiG(settings.antig_key)
     github = GitHub(settings.github_read_token)
+    workspace = Workspace(github, settings.demo)
     devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
 
     polling: set[str] = set()
@@ -442,6 +446,11 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(ROOT / "static" / "index.html")
 
+    @app.get("/workspace/{job_id}")
+    def workspace_page(job_id: JobID) -> FileResponse:
+        store.get(job_id)
+        return FileResponse(ROOT / "static" / "workspace.html")
+
     @app.get("/api/config")
     def config() -> dict[str, Any]:
         return {
@@ -458,6 +467,30 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @app.get("/api/jobs/{job_id}")
     def job(job_id: JobID) -> dict[str, Any]:
         return public_job(store.get(job_id))
+
+    @app.get("/api/jobs/{job_id}/workspace/tree")
+    def workspace_tree(job_id: JobID, revision: Revision = "base") -> dict[str, Any]:
+        current = store.get(job_id)
+        if not current["repo"]:
+            raise HTTPException(422, "К этой задаче не привязан GitHub-репозиторий.")
+        if revision == "pr" and not current["pr_url"]:
+            raise HTTPException(404, "У задачи пока нет PR.")
+        try:
+            return workspace.tree(current, revision)
+        except ProviderError as exc:
+            raise HTTPException(502, f"GitHub: {exc}") from None
+
+    @app.get("/api/jobs/{job_id}/workspace/file")
+    def workspace_file(
+        job_id: JobID, repo: Repo, commit: Commit, path: SourcePath, blob: Commit, stamp: FileStamp,
+    ) -> dict[str, str]:
+        current = store.get(job_id)
+        if not current["repo"] or not workspace.allowed(job_id, repo, commit, path, blob, stamp):
+            raise HTTPException(409, "Файл не относится к открытому снимку. Обнови дерево.")
+        try:
+            return {"path": path, "text": redact(workspace.file(repo, path, blob))}
+        except ProviderError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @app.post("/api/repo/tree")
     def repo_tree(target: RepoBrowse) -> dict[str, Any]:
@@ -483,7 +516,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise HTTPException(503, "Добавь ключ AntiG и перезапусти сервер.")
         if (task.ref or task.context or task.draft_pr or task.review) and not task.repo:
             raise HTTPException(422, "Для ветки, контекста или настроек Devin укажи репозиторий.")
-        if task.repo and any(part in {".", ".."} for part in task.repo.split("/")):
+        if task.repo and not valid_repo(task.repo):
             raise HTTPException(422, "Укажи корректный репозиторий GitHub.")
         if task.ref and any(part in {"", ".", ".."} for part in task.ref.split("/")):
             raise HTTPException(422, "Укажи корректное имя ветки или тега.")

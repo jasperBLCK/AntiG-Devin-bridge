@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111318">
+  <title>Редактор сессии · Мост</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <script src="/static/workspace.js" defer></script>
+</head>
+<body data-explorer="true">
+  <header class="top">
+    <a class="brand" href="/" title="К списку задач"><img src="/static/icon.svg" width="24" height="24" alt=""><span>Мост</span></a>
+    <span class="top-separator"></span>
+    <div class="top-title"><span class="dim">Редактор</span><span class="dim">/</span><strong id="top-repo">Сессия</strong></div>
+    <div class="top-actions">
+      <a id="pr-link" class="chip" hidden target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg>PR</a>
+      <a id="session-link" class="chip" hidden target="_blank" rel="noopener noreferrer">Devin<svg aria-hidden="true"><use href="/static/workspace-icons.svg#external"/></svg></a>
+    </div>
+  </header>
+  <div class="workbench">
+    <nav class="rail" aria-label="Панели редактора">
+      <button id="toggle-explorer" class="rail-button" type="button" aria-label="Показать или скрыть файлы" aria-controls="explorer" aria-pressed="true" title="Файлы"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#files"/></svg></button>
+      <button id="focus-search" class="rail-button" type="button" aria-label="Поиск файлов" title="Поиск файлов"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg></button>
+      <button id="toggle-journal" class="rail-button" type="button" aria-label="Показать или скрыть журнал" aria-controls="journal" aria-pressed="true" title="Журнал"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#terminal"/></svg></button>
+    </nav>
+    <aside id="explorer" class="explorer" aria-label="Файлы из GitHub">
+      <div class="explorer-toolbar">
+        <h1>Проводник</h1>
+        <button id="reload-tree" type="button" class="icon-button" aria-label="Обновить снимок GitHub" title="Обновить снимок GitHub"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#refresh"/></svg></button>
+      </div>
+      <div class="repo-card">
+        <div class="repo-name"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#repo"/></svg><strong id="repo-name">Загрузка…</strong></div>
+        <label class="revision-label" for="revision">Снимок</label>
+        <select id="revision" aria-label="Источник кода" disabled>
+          <option value="base">База задачи</option>
+          <option value="pr" disabled>Ветка PR</option>
+        </select>
+        <div class="ref-label" id="tree-ref"></div>
+      </div>
+      <label class="search-field"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg><input id="file-search" type="search" placeholder="Найти файл" aria-label="Найти файл по пути" disabled><kbd>/</kbd></label>
+      <p class="explorer-notice" id="tree-notice" role="status">Загружаю файлы…</p>
+      <div id="tree" class="tree"></div>
+    </aside>
+    <main class="stage" aria-label="Рабочая область сессии">
+      <div class="tab-strip" id="tabs" aria-label="Открытые файлы"></div>
+      <div class="editor-toolbar">
+        <div id="breadcrumbs" class="breadcrumbs" aria-label="Путь к файлу"><span class="dim">Файл не выбран</span></div>
+        <button id="copy" class="icon-button" type="button" aria-label="Копировать код" title="Копировать код" disabled><svg aria-hidden="true"><use href="/static/workspace-icons.svg#copy"/></svg></button>
+        <span id="copy-note" class="sr-only" role="status"></span>
+      </div>
+      <div id="editor-scroll" class="editor-scroll" tabindex="0" aria-label="Просмотр исходного кода">
+        <div id="editor-empty" class="editor-empty">
+          <svg aria-hidden="true"><use href="/static/workspace-icons.svg#code"/></svg>
+          <strong id="editor-title">Рабочая область</strong>
+          <p id="editor-hint">Выбери файл в проводнике.</p>
+        </div>
+        <div id="editor" class="editor" hidden><pre id="line-numbers" aria-hidden="true"></pre><pre class="source"><code id="source"></code></pre></div>
+      </div>
+      <section class="journal" id="journal" aria-labelledby="journal-title">
+        <header class="journal-toolbar">
+          <h2 id="journal-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#terminal"/></svg>Журнал сессии</h2>
+          <span class="job-state" id="job-state" aria-live="polite"></span>
+          <button id="close-journal" class="icon-button" type="button" aria-label="Скрыть журнал" title="Скрыть журнал"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#close"/></svg></button>
+        </header>
+        <div class="log-scroll" id="log-scroll" tabindex="0" aria-label="Сообщения сессии"><ol class="log" id="log"></ol></div>
+      </section>
+    </main>
+  </div>
+  <footer class="status-bar">
+    <span id="footer-revision" class="footer-revision"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg><span>GitHub</span></span>
+    <span id="footer-count" class="footer-count"></span>
+    <span class="footer-spacer"></span>
+    <span id="footer-language"></span>
+    <span class="status-readonly"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Только чтение</span>
+  </footer>
+</body>
+</html>
