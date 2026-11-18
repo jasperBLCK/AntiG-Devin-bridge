@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -15,6 +16,27 @@ class ProviderError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class ChatUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+    @classmethod
+    def read(cls, value: Any) -> ChatUsage:
+        if not isinstance(value, dict):
+            return cls()
+
+        def count(field: str) -> int | None:
+            number = value.get(field)
+            return number if type(number) is int and 0 <= number <= 10**12 else None
+
+        input_tokens, output_tokens, total = (count(key) for key in ("prompt_tokens", "completion_tokens", "total_tokens"))
+        if total is None and input_tokens is not None and output_tokens is not None:
+            total = input_tokens + output_tokens
+        return cls(input_tokens, output_tokens, total)
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req: Request, fp: Any, code: int, msg: str,
                          headers: Any, newurl: str) -> None:
@@ -23,6 +45,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 def collect_chat_stream(raw: bytes) -> dict[str, Any]:
     chunks: list[str] = []
+    usage: dict[str, Any] | None = None
     for line in raw.splitlines():
         if not line.startswith(b"data:"):
             continue
@@ -32,13 +55,15 @@ def collect_chat_stream(raw: bytes) -> dict[str, Any]:
         data = json.loads(event)
         if not isinstance(data, dict) or data.get("error"):
             raise ProviderError("AntiG вернул ошибку в потоке ответа.")
+        if isinstance(data.get("usage"), dict) and ChatUsage.read(data["usage"]) != ChatUsage():
+            usage = data["usage"]
         choices = data.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else None
         delta = choice.get("delta") if isinstance(choice, dict) else None
         text = delta.get("content") if isinstance(delta, dict) else None
         if isinstance(text, str):
             chunks.append(text)
-    return {"choices": [{"message": {"content": "".join(chunks)}}]}
+    return {"choices": [{"message": {"content": "".join(chunks)}}], "usage": usage}
 
 
 def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
@@ -104,7 +129,7 @@ class AntiG:
     def __init__(self, key: str) -> None:
         self.key = key
 
-    def text(self, prompt: str, system: str) -> str:
+    def text(self, prompt: str, system: str) -> tuple[str, ChatUsage]:
         data = request_json(f"{self.base}/chat/completions", self.key, {
             "model": GROK_MODEL,
             "stream": True,
@@ -119,7 +144,7 @@ class AntiG:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("Grok не вернул текст.")
-        return content[:60_000]
+        return content[:60_000], ChatUsage.read(data.get("usage"))
 
     def image(self, prompt: str, model: str) -> dict[str, Any]:
         data = request_json(f"{self.base}/images/generations", self.key, {
@@ -218,6 +243,7 @@ class Devin:
         if isinstance(output, dict):
             report = {field: value.strip()[:2000] for field in REPORT_FIELDS
                       if isinstance(value := output.get(field), str)}
+        acus = data.get("acus_consumed")
         return {
             "status": "ended" if detail == "finished" and raw_status != "error" else mapping[raw_status],
             "detail": detail[:80] if isinstance(detail, str) else "",
@@ -225,5 +251,7 @@ class Devin:
             "remote_id": remote_id,
             "session_url": f"https://app.devin.ai/sessions/{remote_id.removeprefix('devin-')}",
             "pr_url": pr_url,
+            **({"devin_acu": float(acus)} if isinstance(acus, (int, float)) and not isinstance(acus, bool)
+               and 0 <= acus <= 10**12 else {}),
             "error": "Сессия Devin завершилась ошибкой." if raw_status == "error" else "",
         }

@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const form = $("job-form");
+const params = new URLSearchParams(location.search);
 const routes = {
   auto: "Grok распределяет", answer: "Ответ Grok", clarify: "Уточнение Grok",
   inspect: "Разбор Devin", implement: "Реализация Devin", grok: "План Grok", devin: "Devin",
@@ -20,8 +21,13 @@ const devinDetails = {
   out_of_quota: "Квота исчерпана",
   inactivity: "Приостановлен из-за бездействия",
 };
-const state = { config: null, jobs: [], selected: null, detail: null, busy: false, loading: 0 };
+const state = { config: null, jobs: [], selected: null, detail: null, busy: false, loading: 0, filter: "all" };
 const project = { tree: null, selected: new Set(), context: null, version: 0 };
+const groups = {
+  active: new Set(["sending", "running", "reviewing"]),
+  waiting: new Set(["awaiting", "paused"]),
+  finished: new Set(["done", "ended"]),
+};
 
 async function api(path, payload) {
   const init = payload === undefined ? {} : {
@@ -117,13 +123,13 @@ function displayFileCount() {
   $("preview-files").disabled = !project.selected.size;
 }
 
-$("repo").addEventListener("input", () => {
+$("repo")?.addEventListener("input", () => {
   resetProject();
   updateForm();
 });
-$("git-ref").addEventListener("input", resetProject);
-$("file-filter").addEventListener("input", displayFiles);
-$("load-tree").addEventListener("click", async () => {
+$("git-ref")?.addEventListener("input", resetProject);
+$("file-filter")?.addEventListener("input", displayFiles);
+$("load-tree")?.addEventListener("click", async () => {
   const repo = $("repo").value.trim();
   const ref = $("git-ref").value.trim();
   resetProject();
@@ -150,7 +156,7 @@ $("load-tree").addEventListener("click", async () => {
   }
 });
 
-$("preview-files").addEventListener("click", async () => {
+$("preview-files")?.addEventListener("click", async () => {
   if (!project.tree || !project.selected.size) return;
   resetContext();
   message("repo-error", "");
@@ -170,21 +176,56 @@ $("preview-files").addEventListener("click", async () => {
   }
 });
 
+const ruNumbers = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 3 });
+function amount(value) { return value == null ? "—" : ruNumbers.format(value); }
+
+async function loadOverview() {
+  try {
+    const { jobs, grok, devin, demo, limits } = await api("/api/overview");
+    for (const [kind, value] of Object.entries(jobs)) $("metric-" + kind).textContent = amount(value);
+    $("usage-scope").textContent = demo ? "Демо · без списаний" : "По данным провайдеров";
+    $("grok-model").textContent = grok.model;
+    $("grok-total").textContent = amount(grok.total_tokens);
+    $("grok-input").textContent = amount(grok.input_tokens);
+    $("grok-output").textContent = amount(grok.output_tokens);
+    $("grok-coverage").textContent = demo ? "В демо AntiG не вызывается." :
+      grok.responses ? "Учтено ответов: " + amount(grok.measured) + " из " + amount(grok.responses) + " записанных." :
+        "Нет записанных ответов с расходом. Медиа не учитываются.";
+    $("grok-context").textContent = "До " + amount(limits.context_files) + " файлов / " +
+      amount(limits.context_chars) + " символов";
+    $("devin-total").textContent = amount(devin.acu);
+    $("devin-coverage").textContent = demo ? "В демо Devin не запускается." :
+      "Сессий с замером: " + amount(devin.measured) + " из " + amount(devin.sessions) + ".";
+    $("acu-default").textContent = amount(limits.default_acu) + " ACU";
+    $("acu-range").textContent = "1–" + amount(limits.max_acu) + " ACU";
+    message("overview-error", "");
+  } catch (error) {
+    message("overview-error", error.message);
+  }
+}
+
 function showHistory() {
-  $("history-count").textContent = String(state.jobs.length);
+  const query = $("history-search").value.toLocaleLowerCase().trim();
+  const visible = state.jobs.filter((job) =>
+    (state.filter === "all" || groups[state.filter].has(job.status)) &&
+    (!query || [job.prompt, job.repo, job.ref, routeTitle(job)].filter(Boolean).join(" ").toLocaleLowerCase().includes(query)));
+  $("history-count").textContent = String(visible.length);
   const list = $("history-list");
-  if (!state.jobs.length) {
-    list.replaceChildren(element("p", "Здесь появятся запущенные задачи.", "history-empty"));
+  if (!visible.length) {
+    const empty = !state.jobs.length ? "Здесь появятся запущенные задачи." : query ?
+      "По этому запросу ничего не найдено." : "В этом разделе пока нет задач.";
+    if (list.firstElementChild?.textContent !== empty) list.replaceChildren(element("p", empty, "history-empty"));
     return;
   }
   const oldRows = new Map(Array.from(list.children).map((row) => [row.dataset.id, row]));
   list.querySelector(".history-empty")?.remove();
-  state.jobs.forEach((job, i) => {
+  visible.forEach((job, i) => {
     let button = oldRows.get(job.id);
     if (!button) {
       button = element("button", "", "job-row");
       button.type = "button";
       button.dataset.id = job.id;
+      button.setAttribute("aria-controls", "result-panel");
       const summary = element("span");
       summary.append(element("span", "", "job-title"), element("span", "", "job-meta"));
       button.append(summary, element("span", "", "status"));
@@ -193,7 +234,7 @@ function showHistory() {
     button.setAttribute("aria-current", String(state.selected === job.id));
     button.querySelector(".job-title").textContent = job.prompt;
     const at = new Date(job.created_at).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
-    button.querySelector(".job-meta").textContent = routeTitle(job) + " · " + at;
+    button.querySelector(".job-meta").textContent = [routeTitle(job), job.repo, at].filter(Boolean).join(" · ");
     const status = button.querySelector(".status");
     status.textContent = statusText(job);
     status.dataset.status = job.status;
@@ -201,6 +242,14 @@ function showHistory() {
     oldRows.delete(job.id);
   });
   oldRows.forEach((row) => row.remove());
+}
+
+function filterHistory(filter) {
+  state.filter = filter;
+  for (const button of document.querySelectorAll("[data-history-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.historyFilter === filter));
+  }
+  showHistory();
 }
 
 function link(title, url) {
@@ -329,6 +378,10 @@ function showResult() {
   stageNode.setAttribute("aria-live", "polite");
   stageNode.append(element("strong", actor), element("span", stage));
   root.replaceChildren(stageNode);
+  if (job.session_url && job.max_acu != null) {
+    const spent = job.devin_acu == null ? "расход пока не известен" : "израсходовано " + amount(job.devin_acu) + " ACU";
+    root.append(element("p", "Devin: " + spent + " · лимит запуска " + amount(job.max_acu) + " ACU", "muted"));
+  }
   if (job.repo) root.append(element("p", [job.repo, job.ref || "база по умолчанию", job.commit_sha?.slice(0, 8)]
     .filter(Boolean).join(" · "), "mono muted"));
   root.append(element("p", job.prompt, "muted"));
@@ -399,7 +452,6 @@ async function selectJob(id) {
 }
 
 async function loadTaskSkills() {
-  const params = new URLSearchParams(location.search);
   const hint = $("task-skills-hint");
   const list = $("task-skill-list");
   try {
@@ -423,8 +475,12 @@ async function loadTaskSkills() {
   }
 }
 
-$("reload").addEventListener("click", () => void load());
-form.addEventListener("submit", async (event) => {
+$("reload")?.addEventListener("click", () => void load());
+$("history-search")?.addEventListener("input", showHistory);
+for (const button of document.querySelectorAll("[data-history-filter]")) {
+  button.addEventListener("click", () => filterHistory(button.dataset.historyFilter));
+}
+form?.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.busy || $("submit").disabled) return;
   const payload = { prompt: $("prompt").value.trim() };
@@ -454,12 +510,10 @@ form.addEventListener("submit", async (event) => {
   updateForm();
   try {
     const job = await api("/api/jobs", payload);
-    state.jobs.unshift(job);
-    state.detail = job;
-    await selectJob(job.id);
+    location.assign("/sessions?job=" + encodeURIComponent(job.id));
+    return;
   } catch (error) {
     message("form-error", error.message);
-  } finally {
     state.busy = false;
     updateForm();
   }
@@ -469,27 +523,42 @@ async function init() {
   try {
     state.config = await api("/api/config");
     const cfg = state.config;
-    $("environment").textContent = cfg.demo ? "Демо · без внешних запросов" :
+    const environment = $("environment");
+    environment.dataset.state = cfg.demo ? "demo" : cfg.antig && cfg.devin ? "connected" : "partial";
+    environment.textContent = cfg.demo ? "Демо · без вызовов агентов" :
       "AntiG: " + (cfg.antig ? "ключ задан" : "нет ключа") + " · Devin: " + (cfg.devin ? "ключ задан" : "нет ключа");
-    updateForm();
-    await load();
-    if (state.jobs.length) await selectJob(state.jobs[0].id);
-    window.setInterval(() => {
-      if (!document.hidden) void load();
-    }, 4000);
+    if (form) {
+      updateForm();
+    } else if ($("history-list")) {
+      const filter = params.get("filter");
+      filterHistory(Object.hasOwn(groups, filter) ? filter : "all");
+      const job = params.get("job");
+      if (/^[a-f0-9]{32}$/.test(job || "")) await selectJob(job);
+      else await load();
+      window.setInterval(() => {
+        if (!document.hidden) void load();
+      }, 4000);
+    } else {
+      await loadOverview();
+      window.setInterval(() => {
+        if (!document.hidden) void loadOverview();
+      }, 15000);
+    }
   } catch (error) {
+    $("environment").dataset.state = "offline";
     $("environment").textContent = "Нет связи с панелью";
-    message("form-error", error.message);
+    const field = form ? "form-error" : $("history-error") ? "history-error" : "overview-error";
+    message(field, error.message);
   }
 }
 
-const initialTask = new URLSearchParams(location.search);
-if (initialTask.get("skill")) {
-  const repo = initialTask.get("repo");
-  const ref = initialTask.get("ref");
-  if (repo && repo.length <= 200 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) $("repo").value = repo;
-  if (ref && ref.length <= 200 && /^[A-Za-z0-9_./-]+$/.test(ref)) $("git-ref").value = ref;
+if (form) {
+  if (params.get("skill")) {
+    const repo = params.get("repo");
+    const ref = params.get("ref");
+    if (repo && repo.length <= 200 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) $("repo").value = repo;
+    if (ref && ref.length <= 200 && /^[A-Za-z0-9_./-]+$/.test(ref)) $("git-ref").value = ref;
+  }
+  void loadTaskSkills();
 }
-updateForm();
-void loadTaskSkills();
 void init();

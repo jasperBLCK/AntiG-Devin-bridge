@@ -13,7 +13,7 @@
 </head>
 <body data-explorer="true">
   <header class="top">
-    <a class="brand" href="/" title="К списку задач"><img src="/static/icon.svg" width="24" height="24" alt=""><span>Мост</span></a>
+    <a id="workspace-home" class="brand" href="/" title="На главную"><img src="/static/icon.svg" width="24" height="24" alt=""><span>Мост</span></a>
     <span class="top-separator"></span>
     <div class="top-title"><span class="dim">Редактор</span><span class="dim">/</span><strong id="top-repo">Сессия</strong></div>
     <div class="top-actions">
@@ -79,7 +79,9 @@
         </header>
         <div class="market-controls">
           <nav class="market-filters" aria-label="Разделы скиллов">
-            <button type="button" data-market-tab="catalog" aria-pressed="true">Каталог</button>
+            <button type="button" data-market-tab="catalog" aria-pressed="true">Витрина</button>
+            <button type="button" data-market-tab="design" aria-pressed="false">Дизайн</button>
+            <button type="button" data-market-tab="recommended" aria-pressed="false">Топ Grok + Devin</button>
             <button type="button" data-market-tab="ready" aria-pressed="false">Готовые для агентов</button>
             <button type="button" data-market-tab="library" aria-pressed="false">Моя библиотека</button>
           </nav>
@@ -87,15 +89,48 @@
             <input id="market-query" type="search" maxlength="100" aria-label="Поиск скиллов" placeholder="Название или тема: React, Python, design…">
           </label>
         </div>
+        <section class="market-collection" id="design-collection" aria-label="Темы дизайна" hidden>
+          <div><strong>Дизайн и интерфейсы</strong><p>Ищи по-русски или выбери направление. Поиск обращается к Skills.sh, а не к уже открытым карточкам.</p></div>
+          <div class="market-filters" role="group" aria-label="Направления дизайна">
+            <button type="button" data-design-topic="all" aria-pressed="true">Все</button>
+            <button type="button" data-design-topic="ui" aria-pressed="false">UI/UX</button>
+            <button type="button" data-design-topic="figma" aria-pressed="false">Figma</button>
+            <button type="button" data-design-topic="systems" aria-pressed="false">Дизайн-системы</button>
+            <button type="button" data-design-topic="motion" aria-pressed="false">Анимация</button>
+            <button type="button" data-design-topic="type" aria-pressed="false">Типографика</button>
+            <button type="button" data-design-topic="accessibility" aria-pressed="false">Доступность</button>
+            <button type="button" data-design-topic="mobile" aria-pressed="false">Мобильный UI</button>
+            <button type="button" data-design-topic="branding" aria-pressed="false">Брендинг</button>
+            <button type="button" data-design-topic="frontend" aria-pressed="false">Фронтенд</button>
+          </div>
+        </section>
+        <section class="market-collection" id="recommended-collection" aria-label="Рекомендации для связки" hidden>
+          <div><strong>Рекомендации для Grok + Devin</strong><p>Grok помогает разобраться и спланировать; Devin сверяет план с проектом и выполняет разрешённую работу. В обзоре каждого набора видны инструкции обоих.</p></div>
+          <div class="market-filters" role="group" aria-label="Категории готовых наборов">
+            <button type="button" data-recipe-group="all" aria-pressed="true">Все</button>
+            <button type="button" data-recipe-group="design" aria-pressed="false">Дизайн и UI</button>
+            <button type="button" data-recipe-group="engineering" aria-pressed="false">Инженерия</button>
+          </div>
+        </section>
+        <div class="market-ranks">
+          <span lang="en">Skills.sh</span>
+          <nav class="market-filters" aria-label="Рейтинги Skills.sh">
+            <button type="button" data-market-tab="all-time" aria-pressed="false" lang="en">All Time</button>
+            <button type="button" data-market-tab="trending" aria-pressed="false" lang="en">Trending (24h)</button>
+            <button type="button" data-market-tab="hot" aria-pressed="false" lang="en">Hot</button>
+          </nav>
+          <a id="market-global" target="_blank" rel="noopener noreferrer" hidden></a>
+        </div>
         <div class="market-meta">
           <p id="market-status" role="status">Загружаю каталог…</p>
           <label>Сортировка <select id="market-sort">
-            <option value="default">Рекомендуемые</option>
+            <option value="default">По умолчанию</option>
             <option value="installs">По установкам</option>
             <option value="rating">По отзывам</option>
           </select></label>
         </div>
         <div id="market-results" class="market-results"></div>
+        <button type="button" id="market-more" class="market-button" hidden>Показать ещё</button>
         <p class="market-source">Каталог и установки — <a href="https://skills.sh/" target="_blank" rel="noopener noreferrer">Skills.sh</a>. Звёзды и отзывы — от пользователей «Моста».</p>
       </div>
     </section>

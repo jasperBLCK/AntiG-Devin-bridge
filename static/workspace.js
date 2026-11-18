@@ -3,6 +3,10 @@
 const $ = (id) => document.getElementById(id);
 const id = window.location.pathname.startsWith("/workspace/") ? window.location.pathname.split("/").filter(Boolean).at(-1) : null;
 const endpoint = "/api/jobs/" + id;
+if (id) {
+  $("workspace-home").href = "/sessions?job=" + encodeURIComponent(id);
+  $("workspace-home").title = "К сессии";
+}
 const state = { job: null, tree: null, tabs: new Map(), active: null, expanded: new Set(), request: 0 };
 const statuses = {
   sending: "Запуск", awaiting: "Ждёт подтверждения", running: "В работе", paused: "На паузе",

@@ -30,7 +30,7 @@ from orchestration import (
     parse_decision,
     with_skills,
 )
-from providers import GROK_MODEL, AntiG, Devin, ProviderError
+from providers import GROK_MODEL, AntiG, ChatUsage, Devin, ProviderError
 from repository import (
     DEMO_FILES,
     MAX_CONTEXT_CHARS,
@@ -43,6 +43,8 @@ from skills_market import MAX_TASK_SKILLS, SkillID, Skills
 from workspace import Revision, Workspace
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_ACU = 5
+MAX_ACU = 100
 logger = logging.getLogger(__name__)
 PUBLIC_COLUMNS = (
     "id", "mode", "route", "prompt", "model", "repo", "ref", "commit_sha", "created_at", "status",
@@ -104,7 +106,7 @@ class Submission(BaseModel):
     repo: Repo | None = None
     ref: GitRef | None = None
     context: ContextFiles | None = None
-    max_acu: int = Field(default=5, ge=1, le=100)
+    max_acu: int = Field(default=DEFAULT_ACU, ge=1, le=MAX_ACU)
     draft_pr: bool = False
     review: bool = False
     skill_ids: list[SkillID] = Field(default_factory=list, max_length=MAX_TASK_SKILLS)
@@ -135,6 +137,11 @@ class Store:
                     result TEXT, media_url TEXT, remote_id TEXT, session_url TEXT,
                     pr_url TEXT, progress INTEGER, error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS grok_usage (
+                    job_id TEXT NOT NULL, phase TEXT NOT NULL, model TEXT NOT NULL,
+                    input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+                    PRIMARY KEY (job_id, phase)
+                );
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
             additions = {
@@ -143,6 +150,7 @@ class Store:
                 "activity": "TEXT NOT NULL DEFAULT '{}'", "last_polled": "REAL NOT NULL DEFAULT 0",
                 "review_allowed": "INTEGER NOT NULL DEFAULT 0",
                 "skills": "TEXT NOT NULL DEFAULT '[]'",
+                "devin_acu": "REAL",
             }
             for column, schema in additions.items():
                 if column not in columns:
@@ -184,6 +192,37 @@ class Store:
             """, (before, before)).fetchall()
         return [row["id"] for row in rows]
 
+    def record_grok(self, job_id: str, phase: str, usage: ChatUsage) -> None:
+        with closing(self.connect()) as conn, conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO grok_usage (job_id, phase, model, input_tokens, output_tokens, total_tokens)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (job_id, phase, GROK_MODEL, usage.input_tokens, usage.output_tokens, usage.total_tokens))
+
+    def overview(self, demo: bool) -> dict[str, Any]:
+        with closing(self.connect()) as conn:
+            rows = conn.execute("SELECT status FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()
+            status_counts = {key: sum(row["status"] in statuses for row in rows) for key, statuses in (
+                ("active", {"sending", "running", "reviewing"}), ("waiting", {"awaiting", "paused"}),
+                ("finished", {"done", "ended"}),
+            )}
+            grok = conn.execute("""
+                SELECT SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                       SUM(total_tokens) AS total_tokens, COUNT(*) AS responses,
+                       COUNT(total_tokens) AS measured
+                FROM grok_usage WHERE model = ? AND NOT ?
+            """, (GROK_MODEL, demo)).fetchone()
+            devin = conn.execute("""
+                SELECT SUM(devin_acu) AS acu, COUNT(devin_acu) AS measured, COUNT(*) AS sessions
+                FROM jobs WHERE session_url IS NOT NULL AND session_url != '' AND NOT ?
+            """, (demo,)).fetchone()
+        return {
+            "demo": demo, "jobs": {"total": len(rows), **status_counts},
+            "grok": {"model": GROK_MODEL, **dict(grok)}, "devin": dict(devin),
+            "limits": {"default_acu": DEFAULT_ACU, "max_acu": MAX_ACU,
+                       "context_files": MAX_FILES, "context_chars": MAX_CONTEXT_CHARS},
+        }
+
     def insert(self, task: Submission, skills: list[dict[str, str]]) -> dict[str, Any]:
         job_id = uuid4().hex
         with closing(self.connect()) as conn, conn:
@@ -198,6 +237,7 @@ class Store:
         keys = {
             "status", "result", "media_url", "remote_id", "session_url", "pr_url", "progress", "error",
             "model", "route", "reason", "plan", "activity", "routed_at", "finished_at", "reviewed_at", "last_polled",
+            "devin_acu",
         }
         columns = [key for key in update if key in keys]
         assignments = ", ".join(f"{column} = ?" for column in columns)
@@ -211,7 +251,7 @@ class Store:
 def public_job(job: dict[str, Any], *, full: bool = True) -> dict[str, Any]:
     result = {key: job[key] for key in PUBLIC_COLUMNS}
     if full:
-        result.update({key: job[key] for key in ("result", "reason", "plan", "error", "media_url")})
+        result.update({key: job[key] for key in ("result", "reason", "plan", "error", "media_url", "max_acu", "devin_acu")})
         result["skills"] = [{key: skill[key] for key in ("id", "title")} for skill in job["skills"]]
         result["activity"] = {key: val for key, val in job["activity"].items()
                               if key not in {"cursor", "pr_checked", "pr_url"}}
@@ -222,6 +262,12 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     store = Store(settings.db)
     skills = Skills(store.connect, public=not settings.demo or settings.public_skills)
     antig = AntiG(settings.antig_key)
+
+    def grok_text(job_id: str, phase: str, prompt: str, system: str) -> str:
+        content, usage = antig.text(prompt, system)
+        store.record_grok(job_id, phase, usage)
+        return content
+
     github = GitHub(settings.github_read_token)
     workspace = Workspace(github, settings.demo)
     devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
@@ -256,7 +302,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 "files": [{**file, "text": redact(file["text"])} for file in files],
             }, ensure_ascii=False)
             decision = (demo_decision(task.prompt, task.repo) if settings.demo else
-                        parse_decision(antig.text(context, with_skills(ROUTER, recipes, "grok"))))
+                        parse_decision(grok_text(job_id, "route", context, with_skills(ROUTER, recipes, "grok"))))
             content = redact(decision.content)
             update: dict[str, Any] = {"route": decision.route, "reason": redact(decision.reason), "routed_at": iso_now()}
             if decision.route in DEVIN_ROUTES:
@@ -311,7 +357,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             # Only the opted-in structured report, not raw messages, diffs or tool logs, goes back to AntiG.
             review_input = json.dumps({"request": redact(job["prompt"]), "devin_report": report}, ensure_ascii=False)
             result = ("Демо-разбор Grok: сверь проверку пустого файла с критериями задачи."
-                      if settings.demo else antig.text(review_input, with_skills(REVIEWER, job["skills"], "grok")))
+                      if settings.demo else grok_text(job["id"], "review", review_input,
+                                                       with_skills(REVIEWER, job["skills"], "grok")))
             update = {"status": "ended", "result": redact(result), "reviewed_at": iso_now()}
         except ProviderError as exc:
             update = {"status": "ended", "error": f"Разбор Grok недоступен: {exc}"}
@@ -458,6 +505,14 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(ROOT / "static" / "index.html")
 
+    @app.get("/tasks/new")
+    def task_page() -> FileResponse:
+        return FileResponse(ROOT / "static" / "new-task.html")
+
+    @app.get("/sessions")
+    def sessions_page() -> FileResponse:
+        return FileResponse(ROOT / "static" / "sessions.html")
+
     @app.get("/skills")
     def skills_page() -> FileResponse:
         return FileResponse(ROOT / "static" / "workspace.html")
@@ -479,6 +534,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @app.get("/api/jobs")
     def recent() -> list[dict[str, Any]]:
         return [public_job(row, full=False) for row in store.recent()]
+
+    @app.get("/api/overview")
+    def overview() -> dict[str, Any]:
+        return store.overview(settings.demo)
 
     @app.get("/api/jobs/{job_id}")
     def job(job_id: JobID) -> dict[str, Any]:

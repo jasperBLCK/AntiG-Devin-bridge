@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#10131d">
+  <title>Новая задача · Мост</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <aside class="sidebar" aria-label="Навигация кабинета">
+    <a href="/" class="brand"><img src="/static/icon.svg" width="34" height="34" alt=""><span><strong>Мост</strong><small>AntiG × Devin</small></span></a>
+    <nav class="dashboard-nav" aria-label="Разделы">
+      <span class="nav-caption">РАБОЧАЯ СРЕДА</span>
+      <a href="/"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layout"/></svg>Обзор</a>
+      <a href="/tasks/new" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+      <a href="/sessions"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
+      <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
+    </nav>
+    <div class="sidebar-foot"><span class="nav-caption">ОРКЕСТРАЦИЯ</span><strong>Grok + Devin</strong><span>Одна задача, два агента</span></div>
+  </aside>
+  <div class="dashboard">
+  <header class="topbar">
+    <div class="top-inner">
+      <div class="top-context"><span>Рабочая среда</span><span class="divider">/</span><strong>Новая задача</strong></div>
+      <span class="environment" id="environment">Подключение…</span>
+    </div>
+  </header>
+  <main id="main">
+    <header class="page-heading"><h1>Новая задача</h1><p>Опиши, что нужно сделать. Мост сам выберет исполнителя.</p></header>
+    <noscript>Включи JavaScript, чтобы запустить задачу.</noscript>
+    <div class="compose-layout">
+      <section class="panel compose" id="compose" aria-labelledby="compose-title">
+        <div class="panel-header"><h2 id="compose-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Параметры задачи</h2></div>
+        <form id="job-form">
+          <label for="prompt">Что нужно сделать?</label>
+          <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: исправь импорт пустого CSV и добавь регрессионный тест"></textarea>
+          <div id="project-fields" class="project-fields">
+            <div class="project-inputs">
+              <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
+              <div><label for="git-ref">Ветка или тег</label><input id="git-ref" name="git-ref" placeholder="По умолчанию" maxlength="200"></div>
+            </div>
+            <div id="repo-browser" class="repo-browser">
+              <button id="load-tree" type="button" class="quiet">Выбрать файлы</button>
+              <span id="repo-hint" class="muted">Необязательно. Grok увидит только файлы, которые разрешишь отправить.</span>
+              <div id="repo-tree" hidden>
+                <label for="file-filter">Найти файл</label>
+                <input id="file-filter" type="search" placeholder="Например: README или src/">
+                <div id="file-list" aria-label="Файлы репозитория" class="file-list"></div>
+                <button id="preview-files" type="button" class="quiet" disabled>Посмотреть выбранный код</button>
+                <span id="file-count" class="mono muted"></span>
+              </div>
+              <p id="repo-error" class="error" role="alert" hidden></p>
+              <div id="context-confirm" hidden>
+                <pre id="context-preview" tabindex="0"></pre>
+                <label class="confirmation"><input id="share-context" type="checkbox"> Отправить этот код в AntiG вместе с задачей</label>
+              </div>
+            </div>
+          </div>
+          <fieldset id="devin-fields" class="devin-fields" hidden disabled>
+            <legend>Если задачу возьмёт Devin</legend>
+            <div class="budget"><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
+            <label class="confirmation"><input id="draft-pr" type="checkbox"> Разрешить черновик PR (без merge)</label>
+            <label class="confirmation"><input id="review" type="checkbox" checked> Дать Grok разобрать итоговый отчёт Devin</label>
+          </fieldset>
+          <fieldset class="task-skills">
+            <legend>Скиллы для этой задачи</legend>
+            <p id="task-skills-hint" class="muted" role="status">Загружаю библиотеку…</p>
+            <div id="task-skill-list"></div>
+            <a href="/skills" class="action-link">Открыть маркетплейс</a>
+          </fieldset>
+          <div class="form-actions">
+            <button type="submit" id="submit" class="primary" disabled>Запустить задачу</button>
+            <span id="form-hint" class="muted">Распределение автоматическое</span>
+          </div>
+          <p id="form-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+
+    </div>
+
+    <footer><span>AntiG × Devin</span><span>Автоматическое распределение и журнал работы</span></footer>
+  </main>
+  </div>
+</body>
+</html>

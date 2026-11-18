@@ -7,10 +7,20 @@
   const install = byId("skill-install");
   const reviewForm = byId("skill-review-form");
   const reviewSubmit = byId("skill-review-submit");
+  const sort = byId("market-sort");
+  const more = byId("market-more");
+  const globalLink = byId("market-global");
+  const rankPaths = { "all-time": "/", trending: "/trending", hot: "/hot" };
   const number = new Intl.NumberFormat("ru-RU");
   const tabLabels = [...document.querySelectorAll("[data-market-tab]")];
+  const designTopics = [...document.querySelectorAll("[data-design-topic]")];
+  const recipeGroups = [...document.querySelectorAll("[data-recipe-group]")];
   let currentTab = "catalog";
+  let currentTopic = "all";
+  let currentGroup = "all";
+  let opened = false;
   let results = [];
+  let page = 1;
   let openSkill = null;
   let request = 0;
   let timer;
@@ -45,46 +55,73 @@
   }
 
   function renderResults() {
-    const sort = byId("market-sort").value;
-    const items = [...results];
-    if (sort === "installs") items.sort((a, b) => (b.installs ?? -1) - (a.installs ?? -1));
-    if (sort === "rating") items.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1) || b.votes - a.votes);
-    const cards = items.map((item) => {
+    const cards = results.map((item) => {
       const card = node("button", "", "market-card");
       card.type = "button";
-      const status = item.recipe_title ? "Готово для агентов" : "Из Skills.sh";
-      const badge = node("span", item.installed ? "В библиотеке" : status, "market-badge");
+      const status = currentTab === "recommended" ? (item.recipe_group === "design" ? "Дизайн и UI" : "Инженерия") :
+        item.recipe_title ? "Готово для агентов" : "Из Skills.sh";
+      const label = item.installed ? "В библиотеке" : status;
+      const badge = node("span", item.rank ? "#" + item.rank + " · " + label : label, "market-badge");
       badge.dataset.ready = String(Boolean(item.recipe_title));
       const title = node("strong", item.recipe_title || item.name, "market-card-name");
       const source = node("span", item.source, "market-card-source");
       const stats = node("span", ratings(item), "market-card-stats");
       if (item.installs != null) stats.append(node("span", "↓ " + number.format(item.installs), "market-installs"));
-      card.append(badge, title, source, stats);
+      if (item.rank_stat) stats.append(node("span", item.rank_stat + " · " + item.rank_label, "market-installs"));
+      card.append(badge, title, source);
+      if (currentTab === "recommended") card.append(node("span", item.description, "market-card-summary"));
+      card.append(stats);
       card.addEventListener("click", () => void showInfo(item));
       return card;
     });
     byId("market-results").replaceChildren(...cards);
   }
 
-  async function search() {
+  async function search(nextPage = 1) {
     clearTimeout(timer);
     const version = ++request;
     searchAbort?.abort();
     searchAbort = new AbortController();
     const status = byId("market-status");
     status.textContent = "Загружаю каталог…";
-    const params = new URLSearchParams({ q: input.value.trim(), tab: currentTab });
+    more.disabled = true;
+    const q = input.value.trim();
+    const params = new URLSearchParams({
+      q, tab: currentTab, sort: sort.value, page: nextPage, topic: currentTopic, group: currentGroup,
+    });
     try {
       const data = await api("?" + params, { signal: searchAbort.signal });
       if (request !== version) return;
-      results = data.items;
+      if (nextPage === 1) results = [];
+      const seen = new Set(results.map((item) => item.id));
+      results.push(...data.items.filter((item) => !seen.has(item.id)));
+      page = nextPage;
       renderResults();
-      status.textContent = data.warning || (!results.length ? "Ничего не найдено. Попробуй другой запрос или раздел." :
-        "Найдено в выдаче: " + results.length + (data.public ? "" : " · офлайн-демо"));
+      const ranked = currentTab in rankPaths;
+      const context = ranked ? " в доступной части рейтинга" :
+        currentTab === "catalog" && !q ? " в витрине" : currentTab === "design" && !q ? " по дизайну" : "";
+      const count = results.length ? `Показано ${number.format(results.length)} из ${number.format(data.total)}${context}` :
+        "Ничего не найдено. Попробуй другой запрос или раздел.";
+      const cap = q && data.public && ["catalog", "design"].includes(currentTab) && data.total >= 200
+        ? "Уточни запрос или тему для другой выдачи." : "";
+      status.textContent = [count, data.warning, cap, data.public ? "" : "офлайн-демо"].filter(Boolean).join(" · ");
+      globalLink.hidden = !ranked || !data.public;
+      if (!globalLink.hidden) {
+        globalLink.href = "https://www.skills.sh" + rankPaths[currentTab];
+        globalLink.textContent = data.source_total
+          ? number.format(data.source_total) + " в Skills.sh ↗"
+          : "Весь рейтинг на Skills.sh ↗";
+      }
+      more.hidden = !data.has_more;
+      more.disabled = false;
     } catch (error) {
       if (request !== version || error.name === "AbortError") return;
-      results = [];
-      renderResults();
+      if (nextPage === 1) {
+        results = [];
+        renderResults();
+        more.hidden = true;
+      }
+      more.disabled = false;
       status.textContent = error.message;
     }
   }
@@ -117,7 +154,7 @@
     const current = job?.();
     if (current?.repo) params.set("repo", current.repo);
     if (current?.ref) params.set("ref", current.ref);
-    task.href = "/?" + params + "#job-form";
+    task.href = "/tasks/new?" + params;
     const upstream = byId("skill-upstream");
     upstream.hidden = !item.url;
     if (item.url) upstream.href = item.url;
@@ -180,17 +217,43 @@
     clearTimeout(timer);
     ++request;
     searchAbort?.abort();
+    more.disabled = true;
     timer = setTimeout(() => void search(), 300);
   });
-  byId("market-sort").addEventListener("change", renderResults);
-  for (const button of tabLabels) {
-    button.addEventListener("click", () => {
-      currentTab = button.dataset.marketTab;
-      input.value = "";
-      for (const peer of tabLabels) peer.setAttribute("aria-pressed", String(peer === button));
-      void search();
-    });
+  sort.addEventListener("change", () => void search());
+  more.addEventListener("click", () => void search(page + 1));
+  function setPressed(buttons, key, value) {
+    for (const button of buttons) button.setAttribute("aria-pressed", String(button.dataset[key] === value));
   }
+
+  function selectTab(tab) {
+    currentTab = tab;
+    currentTopic = currentGroup = "all";
+    input.value = "";
+    input.placeholder = currentTab === "catalog" ? "Название или тема: React, Python, дизайн…" :
+      currentTab === "design" ? "Figma, дизайн-система, анимация…" : "Фильтр этого раздела";
+    sort.value = "default";
+    sort.querySelector("[value=installs]").disabled = currentTab in rankPaths;
+    byId("design-collection").hidden = currentTab !== "design";
+    byId("recommended-collection").hidden = currentTab !== "recommended";
+    more.hidden = globalLink.hidden = true;
+    setPressed(tabLabels, "marketTab", tab);
+    setPressed(designTopics, "designTopic", "all");
+    setPressed(recipeGroups, "recipeGroup", "all");
+    void search();
+  }
+
+  for (const button of tabLabels) button.addEventListener("click", () => selectTab(button.dataset.marketTab));
+  for (const button of designTopics) button.addEventListener("click", () => {
+    currentTopic = button.dataset.designTopic;
+    setPressed(designTopics, "designTopic", currentTopic);
+    void search();
+  });
+  for (const button of recipeGroups) button.addEventListener("click", () => {
+    currentGroup = button.dataset.recipeGroup;
+    setPressed(recipeGroups, "recipeGroup", currentGroup);
+    void search();
+  });
   install.addEventListener("click", () => {
     if (openSkill) void change("/library", { skill_id: openSkill.id, installed: !openSkill.installed });
   });
@@ -204,5 +267,16 @@
     detailAbort?.abort();
     openSkill = null;
   });
-  window.BridgeMarketplace = { open(getJob) { job = getJob; void search(); } };
+  window.BridgeMarketplace = { open(getJob) {
+    job = getJob;
+    if (!opened) {
+      opened = true;
+      const tab = new URLSearchParams(location.search).get("tab");
+      if (tabLabels.some((button) => button.dataset.marketTab === tab)) {
+        selectTab(tab);
+        return;
+      }
+    }
+    void search();
+  } };
 })();

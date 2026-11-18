@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#10131d">
+  <title>Сессии · Мост</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <aside class="sidebar" aria-label="Навигация кабинета">
+    <a href="/" class="brand"><img src="/static/icon.svg" width="34" height="34" alt=""><span><strong>Мост</strong><small>AntiG × Devin</small></span></a>
+    <nav class="dashboard-nav" aria-label="Разделы">
+      <span class="nav-caption">РАБОЧАЯ СРЕДА</span>
+      <a href="/"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layout"/></svg>Обзор</a>
+      <a href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+      <a href="/sessions" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
+      <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
+    </nav>
+    <div class="sidebar-foot"><span class="nav-caption">ОРКЕСТРАЦИЯ</span><strong>Grok + Devin</strong><span>Одна задача, два агента</span></div>
+  </aside>
+  <div class="dashboard">
+  <header class="topbar">
+    <div class="top-inner">
+      <div class="top-context"><span>Рабочая среда</span><span class="divider">/</span><strong>Сессии</strong></div>
+      <span class="environment" id="environment">Подключение…</span>
+    </div>
+  </header>
+  <main id="main">
+    <header class="page-heading">
+      <div><h1>Сессии и история</h1><p>Следи за работой Grok и Devin, возвращайся к результатам.</p></div>
+      <a class="action-link primary" href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+    </header>
+    <noscript>Включи JavaScript, чтобы увидеть историю.</noscript>
+    <div class="workspace">
+      <section class="panel history" id="sessions" aria-labelledby="history-title">
+        <div class="panel-header">
+          <h2 id="history-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Задачи <span id="history-count" class="count">0</span></h2>
+          <button id="reload" type="button" class="quiet" title="Обновить историю" aria-label="Обновить историю"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#refresh"/></svg></button>
+        </div>
+        <div class="history-tools">
+          <div class="history-filters" role="group" aria-label="Фильтр истории">
+            <button type="button" data-history-filter="all" aria-pressed="true">Все</button>
+            <button type="button" data-history-filter="active" aria-pressed="false">В работе</button>
+            <button type="button" data-history-filter="waiting" aria-pressed="false">Ожидают</button>
+            <button type="button" data-history-filter="finished" aria-pressed="false">Завершены</button>
+          </div>
+          <label class="history-search"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg><input id="history-search" type="search" aria-label="Поиск по истории" placeholder="Задача или репозиторий"></label>
+        </div>
+        <p id="history-error" class="error" role="alert" hidden></p>
+        <div id="history-list" class="history-list"></div>
+      </section>
+      <section class="panel result-panel" id="result-panel" aria-labelledby="result-title">
+        <div class="panel-header">
+          <h2 id="result-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#terminal"/></svg>Ход задачи</h2>
+          <span id="result-status" class="status" hidden></span>
+        </div>
+        <div id="result" class="result"><p class="muted">Выбери задачу в списке, чтобы увидеть ход работы.</p></div>
+      </section>
+    </div>
+
+    <footer><span>AntiG × Devin</span><span>Автоматическое распределение и журнал работы</span></footer>
+  </main>
+  </div>
+</body>
+</html>

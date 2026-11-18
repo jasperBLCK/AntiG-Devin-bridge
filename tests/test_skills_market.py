@@ -9,7 +9,15 @@ from test_bridge import WRITE, chat, route
 
 from app import Settings, create_app
 from providers import ProviderError
-from skills_market import RECIPES, directory_overview, search_directory
+from skills_market import (
+    DESIGN_TOPICS,
+    RECIPES,
+    TOPICS,
+    directory_overview,
+    leaderboard,
+    search_directory,
+    showcase,
+)
 
 READY = "bridge/agent-skills/regression-tests"
 OTHER_READY = "anthropics/skills/frontend-design"
@@ -23,6 +31,8 @@ class SkillMarketTests(unittest.TestCase):
         self.path = Path(folder.name) / "bridge.sqlite3"
         search_directory.cache_clear()
         directory_overview.cache_clear()
+        leaderboard.cache_clear()
+        showcase.cache_clear()
 
     def client(self, *, demo=True, public=False):
         return TestClient(create_app(Settings(self.path, demo=demo, public_skills=public,
@@ -110,6 +120,73 @@ class SkillMarketTests(unittest.TestCase):
             self.assertEqual(sum(review["mine"] for review in info["reviews"]), 1)
             self.assertEqual(self.select(first, installed=False).status_code, 200)
             self.assertEqual(self.submit(first, [READY]).status_code, 422)
+
+    def test_large_showcase_has_unique_paginated_cards_and_recommendations_are_local(self):
+        def data(url, _key):
+            topic = parse_qs(urlsplit(url).query)["q"][0]
+            topic_id = TOPICS.index(topic)
+            return {"skills": [
+                {"id": f"test/repo/card-{i}", "installs": i}
+                for i in range(topic_id * 160, topic_id * 160 + 200)
+            ]}
+
+        with self.client(public=True) as client, patch("skills_market.request_json", side_effect=data) as external:
+            cards = []
+            for page in range(1, 41):
+                result = client.get("/api/skills", params={"page": page, "sort": "installs"}).json()
+                cards.extend(result["items"])
+                if not result["has_more"]:
+                    break
+            self.assertGreaterEqual(result["total"], 600)
+            self.assertEqual(len(cards), len({item["id"] for item in cards}))
+            self.assertEqual(len(cards), result["total"])
+            installs = [item["installs"] for item in cards if item["installs"] is not None]
+            self.assertEqual(installs, sorted(installs, reverse=True))
+            self.assertEqual(external.call_count, len(TOPICS))
+            recommended = client.get("/api/skills", params={"tab": "recommended"}).json()["items"]
+            self.assertEqual(recommended[0]["recipe_title"], "От плана к реализации")
+            self.assertTrue(all(item["recipe_title"] and item["description"] for item in recommended))
+            self.assertEqual(external.call_count, len(TOPICS))
+
+    def test_rankings_preserve_source_positions_and_show_separate_catalog_total(self):
+        html = """
+            <a href="/">All Time (1,234,567)</a>
+            <a href="/site/example.com/demo-skill"><em>2</em><b>Demo skill</b><span>example.com</span><span>7</span>+3</a>
+            <a href="/example/repo/example-skill"><em>1</em><b>Example skill</b><span>example/repo</span><span>9</span>+4</a>
+            <a href="https://untrusted.example/skill">999</a>
+        """
+        with self.client(public=True) as client, patch("skills_market.html_page", return_value=html) as external:
+            for tab, path in (("all-time", "/"), ("trending", "/trending"), ("hot", "/hot")):
+                results = client.get("/api/skills", params={"tab": tab}).json()
+                self.assertEqual((results["total"], results["source_total"]), (2, 1234567))
+                self.assertEqual(external.call_args.args[0], "https://www.skills.sh" + path)
+                self.assertEqual([item["rank"] for item in results["items"]], [1, 2])
+                self.assertEqual(results["items"][-1]["url"], "https://www.skills.sh/site/example.com/demo-skill")
+                self.assertEqual(results["items"][-1]["rank_stat"], "+3")
+
+    def test_design_topics_russian_search_and_recommendation_groups(self):
+        def data(url, _key):
+            query = parse_qs(urlsplit(url).query)["q"][0]
+            if query == "motion animation buttons":
+                return {"skills": [{"id": "example/ui/general"}, {"id": "example/ui/button-animation"}]}
+            topic = list(DESIGN_TOPICS.values()).index(query)
+            return {"skills": [{"id": f"example/ui/skill-{i}"} for i in range(topic * 160, topic * 160 + 200)]}
+
+        with self.client(public=True) as client, patch("skills_market.request_json", side_effect=data) as external:
+            def results(**params):
+                return client.get("/api/skills", params=params).json()
+
+            design = results(tab="design")
+            self.assertGreater(design["total"], 1000)
+            self.assertTrue(design["has_more"])
+            self.assertEqual(external.call_count, len(DESIGN_TOPICS))
+            self.assertEqual(results(tab="design", topic="figma")["total"], 200)
+            self.assertEqual(results(tab="design", topic="motion", q="Анимация кнопок")["items"][0]["id"],
+                             "example/ui/button-animation")
+            for kind in ("design", "engineering"):
+                rows = results(tab="recommended", group=kind)["items"]
+                self.assertGreater(len(rows), 5)
+                self.assertTrue(all(item["recipe_group"] == kind for item in rows))
 
     def test_only_selected_recipes_reach_grok_and_devin_and_survive_uninstall_for_review(self):
         with self.client(demo=False) as client, patch("providers.request_json") as provider:

@@ -3,103 +3,105 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#FCFCFC">
-  <title>Мост · AntiG × Devin</title>
+  <meta name="theme-color" content="#10131d">
+  <title>Обзор · Мост</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <aside class="sidebar" aria-label="Навигация кабинета">
+    <a href="/" class="brand"><img src="/static/icon.svg" width="34" height="34" alt=""><span><strong>Мост</strong><small>AntiG × Devin</small></span></a>
+    <nav class="dashboard-nav" aria-label="Разделы">
+      <span class="nav-caption">РАБОЧАЯ СРЕДА</span>
+      <a href="/" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layout"/></svg>Обзор</a>
+      <a href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+      <a href="/sessions"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
+      <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
+    </nav>
+    <div class="sidebar-foot"><span class="nav-caption">ОРКЕСТРАЦИЯ</span><strong>Grok + Devin</strong><span>Одна задача, два агента</span></div>
+  </aside>
+  <div class="dashboard">
   <header class="topbar">
     <div class="top-inner">
-      <a href="/" class="brand"><img src="/static/icon.svg" width="29" height="29" alt=""><strong>Мост</strong><span>AntiG × Devin</span></a>
-      <div class="header-links">
-        <a class="action-link" href="/skills">Скиллы</a>
-        <span class="environment" id="environment">Подключение…</span>
-      </div>
+      <div class="top-context"><span>Рабочая среда</span><span class="divider">/</span><strong>Обзор</strong></div>
+      <span class="environment" id="environment">Подключение…</span>
     </div>
   </header>
-  <main>
+  <main id="main">
     <section class="intro" aria-labelledby="title">
-      <div>
-        <div class="eyebrow">РАБОЧАЯ СРЕДА</div>
-        <h1 id="title">Разработка в паре</h1>
-        <p>Опиши задачу. Grok и Devin разделят работу, а панель покажет, что происходит.</p>
+      <div class="hero-content">
+        <div class="eyebrow"><span></span> РЕДАКТОР · СЕССИИ · СКИЛЛЫ</div>
+        <h1 id="title">Твой центр<br>разработки</h1>
+        <p>Поставь задачу: Grok и Devin разделят работу, а ты увидишь сессии, код и результаты в одном месте.</p>
+        <div class="hero-actions">
+          <a class="action-link primary" href="/tasks/new"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
+          <a class="action-link" href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Маркетплейс</a>
+        </div>
       </div>
-      <ol class="pipeline" aria-label="Сценарий разработки">
-        <li><span>01</span> Распределение</li><li><span>02</span> Работа</li><li><span>03</span> Проверка</li>
-      </ol>
+      <div class="hero-art" aria-hidden="true">
+        <div class="orbit orbit-outer"></div><div class="orbit orbit-inner"></div>
+        <div class="agent-flow"></div>
+        <div class="agent-tile grok-tile"><svg><use href="/static/workspace-icons.svg#bolt"/></svg><div><b>Grok</b><small>Анализ и план</small></div></div>
+        <div class="agent-tile devin-tile"><svg><use href="/static/workspace-icons.svg#code"/></svg><div><b>Devin</b><small>Код и тесты</small></div></div>
+        <span class="orbit-dot dot-one"></span><span class="orbit-dot dot-two"></span>
+      </div>
     </section>
 
-    <noscript>Включи JavaScript, чтобы запускать задачи.</noscript>
+    <noscript>Включи JavaScript, чтобы увидеть показатели.</noscript>
+    <p id="overview-error" class="error" role="alert" hidden></p>
 
-    <div class="workspace">
-      <section class="panel compose" aria-labelledby="compose-title">
-        <div class="panel-header"><h2 id="compose-title">Новая задача</h2></div>
-        <form id="job-form">
-          <label for="prompt">Что нужно сделать?</label>
-          <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: исправь импорт пустого CSV и добавь регрессионный тест"></textarea>
-          <div id="project-fields" class="project-fields">
-            <div class="project-inputs">
-              <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
-              <div><label for="git-ref">Ветка или тег</label><input id="git-ref" name="git-ref" placeholder="По умолчанию" maxlength="200"></div>
-            </div>
-            <div id="repo-browser" class="repo-browser">
-              <button id="load-tree" type="button" class="quiet">Выбрать файлы</button>
-              <span id="repo-hint" class="muted">Необязательно. Grok увидит только файлы, которые разрешишь отправить.</span>
-              <div id="repo-tree" hidden>
-                <label for="file-filter">Найти файл</label>
-                <input id="file-filter" type="search" placeholder="Например: README или src/">
-                <div id="file-list" aria-label="Файлы репозитория" class="file-list"></div>
-                <button id="preview-files" type="button" class="quiet" disabled>Посмотреть выбранный код</button>
-                <span id="file-count" class="mono muted"></span>
-              </div>
-              <p id="repo-error" class="error" role="alert" hidden></p>
-              <div id="context-confirm" hidden>
-                <pre id="context-preview" tabindex="0"></pre>
-                <label class="confirmation"><input id="share-context" type="checkbox"> Отправить этот код в AntiG вместе с задачей</label>
-              </div>
-            </div>
-          </div>
-          <fieldset id="devin-fields" class="devin-fields" hidden disabled>
-            <legend>Если задачу возьмёт Devin</legend>
-            <div class="budget"><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
-            <label class="confirmation"><input id="draft-pr" type="checkbox"> Разрешить черновик PR (без merge)</label>
-            <label class="confirmation"><input id="review" type="checkbox" checked> Дать Grok разобрать итоговый отчёт Devin</label>
-          </fieldset>
-          <fieldset class="task-skills">
-            <legend>Скиллы для этой задачи</legend>
-            <p id="task-skills-hint" class="muted" role="status">Загружаю библиотеку…</p>
-            <div id="task-skill-list"></div>
-            <a href="/skills" class="action-link">Открыть маркетплейс</a>
-          </fieldset>
-          <div class="form-actions">
-            <button type="submit" id="submit" class="primary" disabled>Запустить задачу</button>
-            <span id="form-hint" class="muted">Распределение автоматическое</span>
-          </div>
-          <p id="form-error" class="error" role="alert" hidden></p>
-        </form>
-      </section>
-
-      <section class="panel history" aria-labelledby="history-title">
-        <div class="panel-header">
-          <h2 id="history-title">Задачи <span id="history-count" class="count">0</span></h2>
-          <button id="reload" type="button" class="quiet">Обновить</button>
-        </div>
-        <p id="history-error" class="error" role="alert" hidden></p>
-        <div id="history-list" class="history-list"></div>
-      </section>
-    </div>
-
-    <section class="panel result-panel" id="result-panel" aria-labelledby="result-title">
-      <div class="panel-header">
-        <h2 id="result-title">Ход задачи</h2>
-        <span id="result-status" class="status" hidden></span>
+    <section class="overview" aria-labelledby="overview-title">
+      <div class="section-heading"><h2 id="overview-title">Сводка</h2><span>Последние 100 задач</span></div>
+      <div class="metrics">
+        <a class="metric" href="/sessions?filter=all"><span class="metric-icon"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layers"/></svg></span><span>Задач <strong id="metric-total">—</strong></span></a>
+        <a class="metric" href="/sessions?filter=active"><span class="metric-icon metric-live"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#bolt"/></svg></span><span>В работе <strong id="metric-active">—</strong></span></a>
+        <a class="metric" href="/sessions?filter=waiting"><span class="metric-icon metric-waiting"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#clock"/></svg></span><span>Ожидают <strong id="metric-waiting">—</strong></span></a>
+        <a class="metric" href="/sessions?filter=finished"><span class="metric-icon metric-finished"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#check"/></svg></span><span>Завершены <strong id="metric-finished">—</strong></span></a>
       </div>
-      <div id="result" class="result"><p class="muted">Выбери задачу в списке, чтобы увидеть ход работы.</p></div>
+    </section>
+
+    <section class="overview" aria-labelledby="usage-title">
+      <div class="section-heading"><h2 id="usage-title">Расход и лимиты</h2><span id="usage-scope">Данные «Моста»</span></div>
+      <div class="usage-grid">
+        <article class="panel usage-card">
+          <div class="usage-heading">
+            <span class="metric-icon"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#bolt"/></svg></span>
+            <div><h3>Grok · AntiG</h3><span id="grok-model" class="mono muted"></span></div>
+          </div>
+          <div class="usage-value"><strong id="grok-total">—</strong> токенов</div>
+          <dl class="usage-breakdown">
+            <div><dt>Вход</dt><dd id="grok-input">—</dd></div>
+            <div><dt>Выход</dt><dd id="grok-output">—</dd></div>
+          </dl>
+          <p id="grok-coverage" class="usage-note">Только текстовые ответы с данными о расходе.</p>
+          <dl class="usage-limits">
+            <div><dt>Передача кода через «Мост»</dt><dd id="grok-context">—</dd></div>
+            <div><dt>Окно модели и остаток квоты</dt><dd>Нет данных</dd></div>
+          </dl>
+          <a href="https://antig.ru/" target="_blank" rel="noopener noreferrer">Открыть AntiG ↗</a>
+        </article>
+        <article class="panel usage-card">
+          <div class="usage-heading">
+            <span class="metric-icon metric-live"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#code"/></svg></span>
+            <div><h3>Devin</h3><span class="mono muted">Agent Compute Units</span></div>
+          </div>
+          <div class="usage-value"><strong id="devin-total">—</strong> ACU</div>
+          <p id="devin-coverage" class="usage-note">Последний расход, который вернули сессии.</p>
+          <dl class="usage-limits">
+            <div><dt>На запуск по умолчанию</dt><dd id="acu-default">—</dd></div>
+            <div><dt>Диапазон лимита на запуск</dt><dd id="acu-range">—</dd></div>
+            <div><dt>Остаток квоты организации</dt><dd>Нет данных</dd></div>
+          </dl>
+          <a href="https://app.devin.ai/" target="_blank" rel="noopener noreferrer">Открыть Devin ↗</a>
+        </article>
+      </div>
+      <p class="usage-fineprint">Здесь только расход через «Мост» с момента включения учёта. Прочерк означает «нет данных», а не ноль.</p>
     </section>
 
     <footer><span>AntiG × Devin</span><span>Автоматическое распределение и журнал работы</span></footer>
   </main>
+  </div>
 </body>
 </html>

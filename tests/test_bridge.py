@@ -63,6 +63,53 @@ class BridgeTests(unittest.TestCase):
             api.assert_called_once()
             self.assertEqual(api.call_args.args[2]["model"], "grok-4.7")
 
+    def test_overview_totals_reported_usage_without_double_counting_or_faking_missing_values(self):
+        with self.client(live=True) as client, patch("providers.request_json") as api:
+            fresh = client.get("/api/overview").json()
+            self.assertIsNone(fresh["grok"]["total_tokens"])
+            self.assertIsNone(fresh["devin"]["acu"])
+            self.assertEqual(fresh["limits"]["default_acu"], 5)
+            api.side_effect = [
+                {**route("implement"), "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 41}},
+                {"session_id": "devin-usage", "status": "new"},
+                {"status": "running", "acus_consumed": 0}, {"items": []},
+                {"status": "running", "acus_consumed": 0.25}, {"items": []},
+                {"status": "exit", "structured_output": {"summary": "Fixed."}}, {"items": []},
+                {**chat("Reviewed"), "usage": {"prompt_tokens": 20, "completion_tokens": 5}},
+                route("answer"),
+            ]
+            run = self.submit(client, prompt="Fix CSV", repo="test/repo", review=True, max_acu=3)
+            self.assertEqual(self.get(client, run)["max_acu"], 3)
+            self.assertEqual(self.refresh(client, run)["devin_acu"], 0)
+            self.assertEqual(client.get("/api/overview").json()["devin"]["measured"], 1)
+            self.assertEqual(self.refresh(client, run)["devin_acu"], 0.25)
+            self.assertEqual(self.refresh(client, run)["devin_acu"], 0.25)
+            self.submit(client, prompt="Compare CSV parsers")
+            final = client.get("/api/overview").json()
+            self.assertEqual(final["grok"], {"model": "grok-4.7", "input_tokens": 50, "output_tokens": 15,
+                                             "total_tokens": 66, "responses": 3, "measured": 2})
+            self.assertEqual(final["devin"], {"acu": 0.25, "measured": 1, "sessions": 1})
+            self.assertEqual(final["jobs"]["finished"], 2)
+        with self.client(live=True) as client:
+            self.assertEqual(client.get("/api/overview").json()["grok"]["total_tokens"], 66)
+        with self.client(demo=True) as client:
+            demo = client.get("/api/overview").json()
+            self.assertTrue(demo["demo"])
+            self.assertIsNone(demo["grok"]["total_tokens"])
+            self.assertIsNone(demo["devin"]["acu"])
+
+    def test_stream_takes_last_usage_snapshot_instead_of_adding_chunks(self):
+        stream = b'\n'.join((
+            b'data: {"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10},"choices":[{"delta":{"content":"A"}}]}',
+            b'data: {"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11},"choices":[]}',
+            b'data: {"usage":null,"choices":[]}',
+            b'data: [DONE]',
+        ))
+        with patch("providers.request_json", return_value=collect_chat_stream(stream)):
+            content, usage = AntiG("mock").text("prompt", "system")
+            self.assertEqual(content, "A")
+            self.assertEqual((usage.input_tokens, usage.output_tokens, usage.total_tokens), (9, 2, 11))
+
     def test_devin_starts_automatically_and_grok_reviews_opted_in_report(self):
         with (self.client(live=True) as client, patch("providers.request_json") as api,
               patch("repository.request_json") as github):
@@ -221,8 +268,16 @@ class BridgeTests(unittest.TestCase):
     def test_demo_works_without_api_and_persists(self):
         with self.client(demo=True) as client, patch("providers.request_json") as api:
             page = client.get("/").text
-            self.assertIn("Разработка в паре", page)
-            self.assertNotIn('name="mode"', page)
+            self.assertIn("Твой центр", page)
+            self.assertNotIn('id="job-form"', page)
+            self.assertNotIn('id="history-list"', page)
+            form = client.get("/tasks/new").text
+            sessions = client.get("/sessions").text
+            self.assertIn('id="job-form"', form)
+            self.assertNotIn('name="mode"', form)
+            self.assertNotIn('id="history-list"', form)
+            self.assertIn('id="history-list"', sessions)
+            self.assertNotIn('id="job-form"', sessions)
             self.assertTrue(client.get("/api/config").json()["demo"])
             run = self.submit(client, prompt="Исправь импорт CSV", repo="test/repo", review=True)
             self.assertEqual(self.refresh(client, run)["status"], "running")
