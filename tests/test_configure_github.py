@@ -47,7 +47,7 @@ class LocalInstallerTests(unittest.TestCase):
                 state = parse_qs(action.query)["state"][0]
                 manifest = json.loads(unescape(re.search(r'name="manifest" value="([^"]+)"', page.text)[1]))
                 self.assertEqual(manifest["default_permissions"], {"contents": "write", "pull_requests": "read"})
-                self.assertFalse(manifest["hook_attributes"]["active"])
+                self.assertEqual(manifest["hook_attributes"], {"active": False})
                 self.assertFalse(manifest["public"])
                 self.assertEqual(manifest["callback_urls"], [url + "/api/github/callback"])
                 self.assertEqual(manifest["setup_url"], url + "/api/github/setup")

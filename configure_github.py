@@ -109,7 +109,7 @@ def manifest(origin: str) -> dict[str, Any]:
         "setup_url": origin + "/api/github/setup",
         "setup_on_update": True,
         "public": False,
-        "hook_attributes": {"active": False, "url": origin + "/webhook"},
+        "hook_attributes": {"active": False},
         "request_oauth_on_install": False,
         "default_permissions": {"contents": "write", "pull_requests": "read"},
         "default_events": [],
