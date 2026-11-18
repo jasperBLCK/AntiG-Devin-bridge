@@ -7,7 +7,8 @@ if (id) {
   $("workspace-home").href = "/sessions?job=" + encodeURIComponent(id);
   $("workspace-home").title = "К сессии";
 }
-const state = { job: null, tree: null, tabs: new Map(), active: null, expanded: new Set(), request: 0 };
+const state = { job: null, tree: null, tabs: new Map(), drafts: new Map(), draftKey: "",
+  active: null, expanded: new Set(), request: 0, publishing: false, published: null };
 const statuses = {
   sending: "Запуск", awaiting: "Ждёт подтверждения", running: "В работе", paused: "На паузе",
   reviewing: "Разбор Grok", done: "Готово", ended: "Завершено", failed: "Ошибка",
@@ -49,8 +50,10 @@ function icon(name, cls = "") {
   return svg;
 }
 
-async function api(path) {
-  const response = await fetch(path, { cache: "no-store" });
+async function api(path, body) {
+  const options = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Bridge-Request": "1" },
+    body: JSON.stringify(body) } : {};
+  const response = await fetch(path, { cache: "no-store", ...options });
   const data = await response.json();
   if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Не удалось получить данные.");
   return data;
@@ -139,8 +142,7 @@ function renderTree() {
   $("footer-count").textContent = count + (query ? " / " + state.tree.files.length : "") + " файлов";
 }
 
-function showCode(text, kind) {
-  const source = $("source");
+function showCode(text, kind, source = $("source")) {
   const parts = document.createDocumentFragment();
   let end = 0;
   let count = 0;
@@ -155,16 +157,62 @@ function showCode(text, kind) {
   }
   parts.append(text.slice(end));
   source.replaceChildren(parts);
-  const lines = text.split("\n").length;
-  $("line-numbers").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
+  if (source === $("source")) {
+    const lines = text.split("\n").length;
+    $("line-numbers").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
+  }
+}
+
+const draftValue = (tab) => state.drafts.get(tab.file.path)?.text ?? tab.text;
+const editable = (tab) => Boolean(tab?.editable && state.tree?.revision === "base");
+const normalized = (text) => text.replaceAll("\r\n", "\n");
+
+function saveDrafts() {
+  let stored = true;
+  try {
+    if (state.drafts.size) sessionStorage.setItem(state.draftKey, JSON.stringify([...state.drafts]));
+    else sessionStorage.removeItem(state.draftKey);
+  } catch {
+    stored = false;
+  }
+  const editing = !$("edit-layer").hidden;
+  const status = state.drafts.size ? (stored ? "Черновики в этой вкладке" : "Черновики в памяти · не закрывай вкладку")
+    : editing ? "Редактирование" : "Только чтение";
+  $("edit-status").textContent = status;
+  $("change-count").hidden = !state.drafts.size;
+  $("change-count").textContent = state.drafts.size;
+  $("show-changes").disabled = !state.tree;
+  for (const row of $("tabs").children) row.dataset.dirty = String(state.drafts.has(row.dataset.path));
+}
+
+function restoreDrafts() {
+  state.draftKey = ["bridge.drafts", id, state.tree.revision, state.tree.repo, state.tree.commit].join(":");
+  try {
+    const snapshot = new Map(state.tree.files.map((file) => [file.path, file.blob]));
+    state.drafts = new Map(JSON.parse(sessionStorage.getItem(state.draftKey) || "[]")
+      .filter(([path, draft]) => draft.blob === snapshot.get(path) && typeof draft.text === "string"));
+  } catch {
+    state.drafts = new Map();
+  }
+  saveDrafts();
+}
+
+function syncHighlight() {
+  const field = $("edit-source");
+  $("edit-highlight").scrollTo(field.scrollLeft, field.scrollTop);
 }
 
 function renderEditor() {
   const tab = state.tabs.get(state.active);
   const chosen = tab && typeof tab.text === "string";
-  $("editor").hidden = !chosen;
+  const editing = chosen && editable(tab) && tab.editing;
+  $("editor").hidden = !chosen || editing;
+  $("edit-layer").hidden = !editing;
+  $("edit-file").hidden = !chosen || !editable(tab);
+  $("edit-file").textContent = editing ? "Просмотр" : "Править";
   $("editor-empty").hidden = Boolean(chosen);
   $("copy").disabled = !chosen;
+  saveDrafts();
   $("footer-language").textContent = tab ? language(tab.file.path)[0] : "";
   const crumbs = $("breadcrumbs");
   crumbs.replaceChildren();
@@ -180,8 +228,17 @@ function renderEditor() {
     crumbs.append(make("span", part, i === parts.length - 1 ? "filename" : "folder-name"));
   });
   if (chosen) {
-    showCode(tab.text, language(tab.file.path)[1]);
-    $("editor-scroll").scrollTo(tab.left || 0, tab.top || 0);
+    const text = draftValue(tab);
+    if (editing) {
+      const field = $("edit-source");
+      const value = normalized(text);
+      if (field.value !== value) field.value = value;
+      showCode(value + "\n", language(tab.file.path)[1], $("edit-colors"));
+      syncHighlight();
+    } else {
+      showCode(text, language(tab.file.path)[1]);
+      $("editor-scroll").scrollTo(tab.left || 0, tab.top || 0);
+    }
   } else {
     $("editor-title").textContent = tab.error ? "Файл не открылся" : "Загрузка файла…";
     $("editor-hint").textContent = tab.error || tab.file.path;
@@ -193,6 +250,8 @@ function renderTabs() {
   strip.replaceChildren();
   for (const [path] of state.tabs) {
     const tab = make("div", "", "tab");
+    tab.dataset.path = path;
+    tab.dataset.dirty = String(state.drafts.has(path));
     tab.dataset.active = String(path === state.active);
     const show = make("button", "", "tab-action");
     show.type = "button";
@@ -255,6 +314,7 @@ async function openFile(file, fromTree = false) {
     });
     const data = await api(endpoint + "/workspace/file?" + query);
     tab.text = data.text;
+    tab.editable = data.editable;
   } catch (error) {
     tab.error = error.message;
   } finally {
@@ -274,15 +334,21 @@ async function loadTree() {
     const tree = await api(endpoint + "/workspace/tree?revision=" + revision);
     if (request !== state.request) return;
     state.tree = { ...tree, revision };
+    const taskParams = new URLSearchParams({ repo: tree.repo });
+    if (revision === "base") taskParams.set("ref", state.job.ref || tree.ref);
+    $("new-workspace-task").href = "/tasks/new?" + taskParams;
+    $("new-workspace-task").hidden = false;
     $("tree-ref").textContent = tree.ref + " · " + tree.commit.slice(0, 8);
     $("tree-ref").title = tree.ref + " · " + tree.commit;
     $("footer-revision").replaceChildren(icon("branch"), make("span", tree.ref + "@" + tree.commit.slice(0, 8)));
     $("footer-revision").title = tree.commit;
     $("file-search").disabled = false;
-    const changed = tree.commit !== previous?.commit || tree.repo !== previous?.repo;
+    const changed = tree.commit !== previous?.commit || tree.repo !== previous?.repo || revision !== previous?.revision;
     const snapshot = new Map(tree.files.map((entry) => [entry.path, entry]));
     if (changed) {
       const last = state.active;
+      state.published = null;
+      restoreDrafts();
       state.tabs.clear();
       activate(null);
       const requested = previous ? null : new URLSearchParams(window.location.search).get("file");
@@ -414,7 +480,8 @@ document.addEventListener("keydown", (event) => {
   focusSearch();
 });
 $("copy").addEventListener("click", async () => {
-  const text = state.tabs.get(state.active)?.text;
+  const tab = state.tabs.get(state.active);
+  const text = tab && draftValue(tab);
   if (typeof text !== "string") return;
   try {
     await navigator.clipboard.writeText(text);
@@ -424,9 +491,164 @@ $("copy").addEventListener("click", async () => {
   }
 });
 
+$("edit-file").addEventListener("click", () => {
+  const tab = state.tabs.get(state.active);
+  if (!editable(tab)) return;
+  tab.editing = !tab.editing;
+  renderEditor();
+  if (tab.editing) $("edit-source").focus();
+});
+$("edit-source").addEventListener("scroll", syncHighlight);
+$("edit-source").addEventListener("input", () => {
+  const tab = state.tabs.get(state.active);
+  if (!editable(tab)) return;
+  const text = $("edit-source").value;
+  if (text === normalized(tab.text)) state.drafts.delete(tab.file.path);
+  else state.drafts.set(tab.file.path, {
+    blob: tab.file.blob, text: tab.text.includes("\r\n") && !tab.text.replaceAll("\r\n", "").includes("\n")
+      ? text.replaceAll("\n", "\r\n") : text,
+  });
+  state.published = null;
+  showCode(text + "\n", language(tab.file.path)[1], $("edit-colors"));
+  syncHighlight();
+  saveDrafts();
+});
+
+function visibleChanges(before, after) {
+  const source = before.split("\n"), updated = after.split("\n");
+  let start = 0, end = 0;
+  while (start < Math.min(source.length, updated.length) && source[start] === updated[start]) start++;
+  while (end < Math.min(source.length, updated.length) - start && source.at(-end - 1) === updated.at(-end - 1)) end++;
+  return [source.slice(start, source.length - end), updated.slice(start, updated.length - end)];
+}
+
+function renderChanges() {
+  const active = state.tree;
+  $("changes-context").textContent = active.repo + " · " + active.commit.slice(0, 8);
+  const snapshot = new Map(active.files.map((file) => [file.path, file]));
+  const list = $("changes-list");
+  list.replaceChildren();
+  if (!state.drafts.size) list.append(make("p", "Нет правок. Открой файл и нажми «Править».", "dim"));
+  for (const [path, draft] of state.drafts) {
+    const details = make("details", "", "change-item");
+    details.open = state.drafts.size === 1;
+    const summary = make("summary", path);
+    const diff = make("div", "", "change-diff");
+    const preview = make("div");
+    const discard = make("button", "Отменить правку", "ide-button");
+    discard.type = "button";
+    discard.disabled = state.publishing;
+    discard.addEventListener("click", () => {
+      state.drafts.delete(path);
+      renderEditor();
+      renderChanges();
+    });
+    details.addEventListener("toggle", async () => {
+      if (!details.open || diff.hasChildNodes()) return;
+      diff.append(make("p", "Загружаю сравнение…", "dim"));
+      try {
+        const file = snapshot.get(path);
+        const query = new URLSearchParams({ repo: active.repo, commit: active.commit, path, blob: file.blob, stamp: file.stamp });
+        const original = state.tabs.get(path)?.text ?? (await api(endpoint + "/workspace/file?" + query)).text;
+        const [before, after] = visibleChanges(original, draft.text);
+        diff.replaceChildren();
+        for (const [label, lines, kind] of [["До", before, "before"], ["После", after, "after"]]) {
+          const column = make("section", "", kind);
+          column.append(make("b", label), make("pre", lines.length ? lines.join("\n") : "—"));
+          diff.append(column);
+        }
+      } catch (error) {
+        diff.replaceChildren(make("p", error.message, "entry-error"));
+      }
+    });
+    preview.append(diff, discard);
+    details.append(summary, preview);
+    list.append(details);
+  }
+  const enabled = active.can_publish && state.drafts.size <= 12 && state.drafts.size > 0;
+  $("commit-label").hidden = !enabled;
+  $("commit-message").disabled = !enabled || state.publishing;
+  $("publish-changes").hidden = !enabled;
+  $("publish-changes").disabled = state.publishing;
+  $("publish-note").textContent = active.demo ? "Демо: изменения не отправляются в GitHub."
+    : !active.can_publish ? "GitHub-публикация не подключена для этого снимка."
+    : state.drafts.size > 12 ? "До 12 файлов на коммит. Уменьши набор правок."
+    : enabled ? "Создаст новую ветку от этого снимка. Базовая ветка не изменится." : "";
+}
+
+function showChanges() {
+  if (!state.tree || $("changes-dialog").open) return;
+  if (!state.published) $("publish-feedback").hidden = true;
+  renderChanges();
+  $("changes-dialog").showModal();
+}
+$("show-changes").addEventListener("click", showChanges);
+$("close-changes").addEventListener("click", () => { if (!state.publishing) $("changes-dialog").close(); });
+$("changes-dialog").addEventListener("cancel", (event) => { if (state.publishing) event.preventDefault(); });
+document.addEventListener("keydown", (event) => {
+  if (!state.tree || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+  event.preventDefault();
+  showChanges();
+});
+$("publish-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.tree?.can_publish || state.publishing || !state.drafts.size || state.drafts.size > 12) return;
+  state.publishing = true;
+  const { commit, files } = state.tree;
+  const index = new Map(files.map((file) => [file.path, file]));
+  const edits = [...state.drafts].map(([path, draft]) => ({ path, text: draft.text,
+    stamp: index.get(path)?.stamp, blob: draft.blob }));
+  const feedback = $("publish-feedback");
+  feedback.hidden = false;
+  feedback.textContent = "Публикую коммит…";
+  renderChanges();
+  try {
+    const result = await api(endpoint + "/workspace/publish", { commit, edits, message: $("commit-message").value });
+    state.drafts.clear();
+    state.published = result;
+    $("commit-message").value = "";
+    const branch = make("a", "Открыть ветку на GitHub", "result-link");
+    branch.href = result.url;
+    branch.target = "_blank";
+    branch.rel = "noopener noreferrer";
+    feedback.replaceChildren(document.createTextNode("Коммит " + result.commit.slice(0, 8) + " создан. "), branch);
+    renderEditor();
+  } catch (error) {
+    feedback.textContent = error.message;
+  } finally {
+    state.publishing = false;
+    renderChanges();
+  }
+});
+
+async function openWorkspace(event) {
+  event.preventDefault();
+  if ($("open-workspace-submit").disabled) return;
+  const button = $("open-workspace-submit");
+  const error = $("workspace-entry-error");
+  button.disabled = true;
+  error.hidden = true;
+  try {
+    const ref = $("workspace-ref").value.trim();
+    const { id: jobId } = await api("/api/workspaces", { repo: $("workspace-repo").value.trim(), ...(ref ? { ref } : {}) });
+    location.assign("/workspace/" + encodeURIComponent(jobId));
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    button.disabled = false;
+  }
+}
+
 async function init() {
   try {
     state.job = await api(endpoint);
+    $("open-repository").hidden = false;
+    if (state.job.mode === "workspace") {
+      $("workspace-home").href = "/workspace";
+      $("workspace-home").title = "Открыть репозиторий";
+      setJournal(false);
+      $("toggle-journal").hidden = true;
+    }
     renderJob(state.job);
     if (state.job.repo) void loadTree();
     else {
@@ -437,6 +659,7 @@ async function init() {
     notice(error.message, true);
     return;
   }
+  if (state.job.mode === "workspace") return;
   let refreshing = false;
   window.setInterval(async () => {
     if (document.hidden || refreshing) return;
@@ -452,10 +675,21 @@ async function init() {
   }, 4000);
 }
 
-if (!id) {
+const isEntry = location.pathname === "/workspace";
+if (isEntry) {
+  document.body.dataset.workspaceEntry = "true";
+  $("workspace-entry").hidden = false;
+  $("open-workspace-form").addEventListener("submit", openWorkspace);
+  $("open-workspace-demo").addEventListener("click", () => {
+    $("workspace-repo").value = "demo/csv";
+    $("workspace-ref").value = "";
+    $("open-workspace-form").requestSubmit();
+  });
+  api("/api/overview").then((response) => { $("open-workspace-demo").hidden = !response.demo; }).catch(() => {});
+} else if (!id) {
   document.body.dataset.marketOnly = "true";
   $("top-repo").textContent = "Маркетплейс";
   document.title = "Скиллы · Мост";
 }
-if (!id || new URLSearchParams(location.search).get("panel") === "skills") setMarket(true);
+if (!isEntry && (!id || new URLSearchParams(location.search).get("panel") === "skills")) setMarket(true);
 if (id) void init();

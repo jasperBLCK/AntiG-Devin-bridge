@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#111318">
-  <title>Редактор сессии · Мост</title>
+  <title>Рабочая область · Мост</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/workspace.css">
   <link rel="stylesheet" href="/static/marketplace.css">
@@ -15,16 +15,38 @@
   <header class="top">
     <a id="workspace-home" class="brand" href="/" title="На главную"><img src="/static/icon.svg" width="24" height="24" alt=""><span>Мост</span></a>
     <span class="top-separator"></span>
-    <div class="top-title"><span class="dim">Редактор</span><span class="dim">/</span><strong id="top-repo">Сессия</strong></div>
+    <div class="top-title"><span class="dim">Workspace</span><span class="dim">/</span><strong id="top-repo">GitHub</strong></div>
     <div class="top-actions">
+      <a id="open-repository" class="chip" href="/workspace" hidden>Открыть репозиторий</a>
+      <a id="new-workspace-task" class="chip" href="/tasks/new" hidden><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Задача</a>
       <a id="pr-link" class="chip" hidden target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg>PR</a>
       <a id="session-link" class="chip" hidden target="_blank" rel="noopener noreferrer">Devin<svg aria-hidden="true"><use href="/static/workspace-icons.svg#external"/></svg></a>
     </div>
   </header>
+  <main class="workspace-entry" id="workspace-entry" hidden>
+    <div class="workspace-intro">
+      <div class="entry-mark"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#code"/></svg> BRIDGE WORKSPACE</div>
+      <h1>От репозитория<br>к коммиту<span>.</span></h1>
+      <p>Открой снимок из GitHub, поправь код и проверь изменения перед публикацией. Агенты не запускаются.</p>
+      <form id="open-workspace-form">
+        <label>Репозиторий GitHub<input id="workspace-repo" required maxlength="200" placeholder="владелец/репозиторий" spellcheck="false"></label>
+        <label>Ветка или SHA <span class="dim">· необязательно</span><input id="workspace-ref" maxlength="200" placeholder="Ветка по умолчанию" spellcheck="false"></label>
+        <button class="ide-button primary" id="open-workspace-submit" type="submit">Открыть рабочую область</button>
+        <button class="ide-button" id="open-workspace-demo" type="button" hidden>Попробовать на демо</button>
+        <p class="entry-error" id="workspace-entry-error" role="alert" hidden></p>
+      </form>
+    </div>
+    <aside class="entry-steps" aria-label="Как работает редактор">
+      <div class="entry-step"><span>01</span><div><b>Снимок GitHub</b><p>Файлы привязаны к конкретному коммиту.</p></div></div>
+      <div class="entry-step"><span>02</span><div><b>Локальные правки</b><p>Черновики остаются в этой вкладке и не отправляются агентам.</p></div></div>
+      <div class="entry-step"><span>03</span><div><b>Публикация в рабочую ветку</b><p>Посмотри изменения и создай коммит. Базовая ветка останется прежней.</p></div></div>
+    </aside>
+  </main>
   <div class="workbench">
     <nav class="rail" aria-label="Панели редактора">
       <button id="toggle-explorer" class="rail-button" type="button" aria-label="Показать или скрыть файлы" aria-controls="explorer" aria-pressed="true" title="Файлы"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#files"/></svg></button>
       <button id="focus-search" class="rail-button" type="button" aria-label="Поиск файлов" title="Поиск файлов"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#search"/></svg></button>
+      <button id="show-changes" class="rail-button" type="button" aria-label="Изменения" title="Изменения" disabled><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg><span id="change-count" class="rail-count" hidden></span></button>
       <button id="toggle-skills" class="rail-button" type="button" aria-controls="skills-market" aria-pressed="false" aria-label="Скиллы" title="Скиллы"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg></button>
       <button id="toggle-journal" class="rail-button" type="button" aria-label="Показать или скрыть журнал" aria-controls="journal" aria-pressed="true" title="Журнал"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#terminal"/></svg></button>
     </nav>
@@ -50,7 +72,10 @@
       <div class="tab-strip" id="tabs" aria-label="Открытые файлы"></div>
       <div class="editor-toolbar">
         <div id="breadcrumbs" class="breadcrumbs" aria-label="Путь к файлу"><span class="dim">Файл не выбран</span></div>
-        <button id="copy" class="icon-button" type="button" aria-label="Копировать код" title="Копировать код" disabled><svg aria-hidden="true"><use href="/static/workspace-icons.svg#copy"/></svg></button>
+        <div class="editor-actions">
+          <button id="edit-file" class="ide-button" type="button" hidden>Править</button>
+          <button id="copy" class="icon-button" type="button" aria-label="Копировать код" title="Копировать код" disabled><svg aria-hidden="true"><use href="/static/workspace-icons.svg#copy"/></svg></button>
+        </div>
         <span id="copy-note" class="sr-only" role="status"></span>
       </div>
       <div id="editor-scroll" class="editor-scroll" tabindex="0" aria-label="Просмотр исходного кода">
@@ -60,6 +85,10 @@
           <p id="editor-hint">Выбери файл в проводнике.</p>
         </div>
         <div id="editor" class="editor" hidden><pre id="line-numbers" aria-hidden="true"></pre><pre class="source"><code id="source"></code></pre></div>
+        <div class="edit-layer" id="edit-layer" hidden>
+          <div class="edit-highlight" id="edit-highlight" aria-hidden="true"><pre><code id="edit-colors"></code></pre></div>
+          <textarea id="edit-source" aria-label="Редактировать исходный код" spellcheck="false" wrap="off" maxlength="131072" autocapitalize="off" autocomplete="off"></textarea>
+        </div>
       </div>
       <section class="journal" id="journal" aria-labelledby="journal-title">
         <header class="journal-toolbar">
@@ -189,12 +218,23 @@
       <p id="custom-error" class="market-error" role="alert" hidden></p>
     </form>
   </dialog>
+  <dialog id="changes-dialog" class="changes-dialog" aria-labelledby="changes-title">
+    <div class="changes-head"><div><h2 id="changes-title">Изменения</h2><p id="changes-context"></p></div>
+      <button class="icon-button" id="close-changes" type="button" aria-label="Закрыть изменения"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#close"/></svg></button>
+    </div>
+    <div id="changes-list" class="changes-list"></div>
+    <form id="publish-form" class="publish-form">
+      <label id="commit-label">Сообщение коммита<input id="commit-message" maxlength="120" placeholder="Что изменилось?" required></label>
+      <div class="publish-actions"><p id="publish-note" role="status"></p><button type="submit" class="ide-button primary" id="publish-changes">Опубликовать ветку</button></div>
+      <p id="publish-feedback" role="status" hidden></p>
+    </form>
+  </dialog>
   <footer class="status-bar">
     <span id="footer-revision" class="footer-revision"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#branch"/></svg><span>GitHub</span></span>
     <span id="footer-count" class="footer-count"></span>
     <span class="footer-spacer"></span>
     <span id="footer-language"></span>
-    <span class="status-readonly"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Только чтение</span>
+    <span id="edit-status" class="status-readonly">Только чтение</span>
   </footer>
   <footer class="status-bar market-footer" hidden><span>Скиллы · Библиотека этого браузера</span></footer>
 </body>

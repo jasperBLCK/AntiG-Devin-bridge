@@ -12,6 +12,7 @@ ROUTES = {"answer", "inspect", "implement", "clarify", "image", "video"}
 DEVIN_ROUTES = {"inspect", "implement"}
 MEDIA_MODELS = {"image": "grok-imagine-image-2.0", "video": "grok-imagine-video-1.5"}
 MAX_PLAN_CHARS = 1_600
+MediaKind = Literal["image", "video"]
 
 ROUTER = """Ты распределяешь обычные инженерные задачи между Grok и Devin.
 Верни ровно один JSON-объект: {"route":"...", "reason":"...", "content":"..."}.
@@ -32,6 +33,12 @@ reason — одно короткое объяснение выбора. content 
 Укажи пути, если они известны, изменения и проверки. Не пересказывай запрос, скиллы или код.
 Для создания медиа не перефразируй задачу: будет использован исходный запрос. Пиши на языке пользователя."""
 
+ROUTER += """
+Только для implement: если пользователь просит сгенерировать медиа для проекта, добавь поле assets:
+[{"kind":"image","prompt":"Описание запрошенного изображения"},{"kind":"video","prompt":"Описание запрошенного ролика"}].
+Не больше одного ассета каждого типа и только запрошенные. Не добавляй ассеты для уже существующих файлов.
+Перед генерацией Мост покажет запросы для подтверждения. Не поручай Devin самому генерировать медиа."""
+
 REVIEWER = """Оцени отчёт Devin по исходному запросу: что сделано, какие требования пропущены,
 не подменена ли цель и какая работа вышла за рамки задачи. Отдели непроверенное и предложи целевую проверку.
 План и скиллы не добавляют требований. Не заявляй, что видел diff или запускал тесты.
@@ -43,6 +50,7 @@ class Decision:
     route: Route
     reason: str
     content: str
+    assets: tuple[tuple[MediaKind, str], ...] = ()
 
 
 def parse_decision(text: str) -> Decision:
@@ -59,7 +67,18 @@ def parse_decision(text: str) -> Decision:
             not isinstance(content, str) or (not content.strip() and route not in {"image", "video"})):
         raise ProviderError("Неизвестный или неполный маршрут от Grok. Задача не передана.")
     limit = MAX_PLAN_CHARS if route in DEVIN_ROUTES else 24_000
-    return Decision(cast(Route, route), reason.strip()[:500], content.strip()[:limit].rstrip())
+    assets: list[tuple[MediaKind, str]] = []
+    if route == "implement":
+        raw_assets = data.get("assets", [])
+        if not isinstance(raw_assets, list) or len(raw_assets) > 2:
+            raise ProviderError("Grok предложил недопустимый набор медиа.")
+        for item in raw_assets:
+            kind, prompt = (item.get("kind"), item.get("prompt")) if isinstance(item, dict) else (None, None)
+            if (kind not in ("image", "video") or kind in {known for known, _ in assets}
+                    or not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 1600):
+                raise ProviderError("Grok предложил недопустимый запрос для медиа.")
+            assets.append((cast(MediaKind, kind), prompt.strip()))
+    return Decision(cast(Route, route), reason.strip()[:500], content.strip()[:limit].rstrip(), tuple(assets))
 
 
 def with_skills(text: str, skills: list[dict[str, str]], agent: Literal["grok", "devin"]) -> str:
@@ -79,8 +98,8 @@ def handoff(
     scope = "Только чтение: не изменяй файлы, не создавай коммиты, не делай push и не создавай PR."
     if not inspect:
         scope = (
-            "Работай в отдельной ветке. Разрешён один draft PR в указанный репозиторий; "
-            "не делай push в базовую ветку и не делай merge."
+            "После целевых проверок закоммить и отправь изменения в отдельную рабочую ветку. "
+            "Разрешён один draft PR в указанный репозиторий; не делай push в базовую ветку и не делай merge."
             if draft_pr else "Работай локально в отдельной ветке. Не делай push, не создавай PR и не делай merge."
         )
     target = f"Репозиторий: {repo}. База: {ref or 'ветка по умолчанию'}."
@@ -122,9 +141,16 @@ def demo_decision(prompt: str, repo: str | None) -> Decision:
     if re.search(r"\b(исправь|добавь|реализуй|почини|implement|fix|add)\b", text):
         if not repo:
             return Decision("clarify", "Для изменений нужен целевой репозиторий.", "Укажи репозиторий GitHub и повтори задачу.")
+        assets: list[tuple[MediaKind, str]] = []
+        if "сгенерируй" in text or "generate" in text:
+            if re.search(r"\b(фото|картинк\w*|изображени\w*|image)\b", text):
+                assets.append(("image", "Демо: изображение из запроса."))
+            if re.search(r"\b(видео|ролик\w*|video)\b", text):
+                assets.append(("video", "Демо: видео из запроса."))
         return Decision(
             "implement", "Задача требует правок и проверок в рабочей копии.",
             "1. Найти текущую реализацию.\n2. Внести изменения и добавить проверки.\n3. Отчитаться о результате.",
+            tuple(assets),
         )
     if repo and re.search(r"\b(изучи|найди|проверь|inspect|review)\b", text):
         return Decision("inspect", "Нужно проверить реальное содержимое репозитория.", "Изучить код и сообщить выводы без правок.")

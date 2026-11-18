@@ -5,13 +5,20 @@ import tempfile
 import unittest
 from pathlib import Path
 from threading import Event
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from app import Settings, create_app
 from orchestration import MAX_PLAN_CHARS
-from providers import AntiG, ProviderError, collect_chat_stream, https_url
+from providers import (
+    AntiG,
+    Devin,
+    ProviderError,
+    collect_chat_stream,
+    https_url,
+    media_download,
+)
 from repository import GitHub
 
 WRITE = {"X-Bridge-Request": "1"}
@@ -64,6 +71,106 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual((job["route"], job["status"], job["result"]), ("answer", "done", "Answer"))
             api.assert_called_once()
             self.assertEqual(api.call_args.args[2]["model"], "grok-4.7")
+
+    def test_project_media_are_approved_once_and_attached_to_one_devin_session(self):
+        picture = b"\xff\xd8\xffphoto"
+        film = b"\x00\x00\x00\x18ftypmp42video"
+        video_url = "https://vidgen.x.ai/film.mp4"
+        project = "Реализуй страницу, сгенерируй изображение и фоновое видео"
+        decision = chat(json.dumps({"route": "implement", "reason": "Project with assets", "content": "Build the hero.",
+                                    "assets": [{"kind": "image", "prompt": "An abstract line drawing"},
+                                               {"kind": "video", "prompt": "Animated line drawing"}]}))
+        with (self.client(live=True) as client, patch("providers.request_json") as api,
+              patch("app.media_download", return_value=film) as download,
+              patch("providers.Devin.upload", side_effect=["https://app.devin.ai/attachments/image",
+                                                            "https://app.devin.ai/attachments/film"]) as upload):
+            api.side_effect = [
+                decision, {"data": [{"b64_json": base64.b64encode(picture).decode()}]}, {"request_id": "video-test"},
+                {"status": "processing", "progress": 50}, {"status": "done", "video": {"url": video_url}},
+                {"session_id": "devin-project", "status": "new"},
+            ]
+            run = self.submit(client, prompt=project, repo="test/repo", draft_pr=True)
+            job = self.get(client, run)
+            self.assertEqual((job["status"], job["route"]), ("awaiting", "implement"))
+            self.assertEqual([asset["status"] for asset in job["assets"]], ["planned", "planned"])
+            self.assertEqual(api.call_count, 1)
+            self.assertEqual(self.action(client, run, "generate").status_code, 202)
+            self.assertEqual(self.action(client, run, "generate").status_code, 409)
+            waiting = self.get(client, run)
+            self.assertEqual([asset["status"] for asset in waiting["assets"]], ["ready", "running"])
+            self.assertNotIn("remote_id", waiting["assets"][1])
+            self.assertEqual(api.call_count, 3)
+            upload.assert_not_called()
+            self.assertEqual(self.refresh(client, run)["assets"][1]["progress"], 50)
+            ready = self.refresh(client, run)
+            self.assertEqual(ready["session_url"], "https://app.devin.ai/sessions/project")
+            self.assertEqual(len(client.get("/api/jobs").json()), 1)
+            self.assertEqual(api.call_count, 6)
+            download.assert_called_once()
+            self.assertEqual(download.call_args.args[0], video_url)
+            self.assertEqual([entry.args for entry in upload.call_args_list],
+                             [("bridge-image.jpeg", picture, "image/jpeg"), ("bridge-video.mp4", film, "video/mp4")])
+            payload = api.call_args.args[2]
+            self.assertEqual(payload["attachment_urls"], ["https://app.devin.ai/attachments/image",
+                                                          "https://app.devin.ai/attachments/film"])
+            self.assertIn(project, payload["prompt"])
+            self.assertIn("bridge-video.mp4", payload["prompt"])
+            self.assertIn("draft PR", payload["prompt"])
+            for asset, raw in zip(ready["assets"], (picture, film), strict=True):
+                result = client.get(asset["media_url"])
+                self.assertEqual(result.content, raw)
+                self.assertEqual(result.headers["cache-control"], "no-store")
+
+    def test_project_media_failure_keeps_completed_files_without_starting_devin(self):
+        decision = chat(json.dumps({"route": "implement", "reason": "Needs assets", "content": "Use the assets",
+                                    "assets": [{"kind": "image", "prompt": "Gradient"},
+                                               {"kind": "video", "prompt": "Moving gradient"}]}))
+        with (self.client(live=True) as client, patch("providers.request_json") as api,
+              patch("app.media_download", return_value=b"not a video"), patch("providers.Devin.upload") as upload):
+            api.side_effect = [
+                decision, {"data": [{"b64_json": base64.b64encode(b"\xff\xd8\xffimage").decode()}]},
+                {"request_id": "video-test"}, {"status": "done", "video": {"url": "https://vidgen.x.ai/film.mp4"}},
+            ]
+            run = self.submit(client, prompt="Add page and generate assets", repo="test/repo")
+            self.assertEqual(self.action(client, run, "generate").status_code, 202)
+            failed = self.refresh(client, run)
+            self.assertEqual(failed["status"], "failed")
+            self.assertIsNone(failed["session_url"])
+            self.assertEqual(client.get(failed["assets"][0]["media_url"]).content, b"\xff\xd8\xffimage")
+            self.assertEqual(self.action(client, run, "generate").status_code, 409)
+            self.assertEqual(api.call_count, 4)
+            upload.assert_not_called()
+
+    def test_demo_runs_media_and_code_in_one_job_without_external_calls(self):
+        with self.client(demo=True) as client, patch("providers.request_json") as api:
+            run = self.submit(client, prompt="Добавь страницу и сгенерируй фото и видео", repo="demo/csv")
+            self.assertEqual(self.get(client, run)["status"], "awaiting")
+            self.assertEqual(self.action(client, run, "generate").status_code, 202)
+            job = self.get(client, run)
+            self.assertEqual([asset["status"] for asset in job["assets"]], ["demo", "demo"])
+            self.assertEqual(job["status"], "running")
+            self.assertEqual(len(client.get("/api/jobs").json()), 1)
+            api.assert_not_called()
+
+    def test_media_download_rejects_non_allowlisted_hosts_and_nonstandard_ports_before_io(self):
+        with patch("providers.build_opener") as opener:
+            for url in ("http://vidgen.x.ai/a", "https://vidgen.x.ai:4040/a", "https://vidgen.x.ai.example.com/a"):
+                with self.assertRaises(ProviderError):
+                    media_download(url, ("vidgen.x.ai",), 100)
+            opener.assert_not_called()
+
+    def test_devin_upload_uses_org_multipart_endpoint(self):
+        response = MagicMock()
+        response.read.return_value = b'{"url":"https://app.devin.ai/attachments/test"}'
+        with patch("providers.build_opener") as opener:
+            opener.return_value.open.return_value.__enter__.return_value = response
+            self.assertEqual(Devin("test-key", "org-test").upload("bridge-video.mp4", b"video", "video/mp4"),
+                             "https://app.devin.ai/attachments/test")
+            req = opener.return_value.open.call_args.args[0]
+            self.assertEqual(req.full_url, "https://api.devin.ai/v3/organizations/org-test/attachments")
+            self.assertEqual(req.get_method(), "POST")
+            self.assertIn(b'name="file"; filename="bridge-video.mp4"', req.data)
+            self.assertIn(b"Content-Type: video/mp4\r\n\r\nvideo", req.data)
 
     def test_original_goal_reaches_both_agents_separately_from_bounded_plan(self):
         request = "Собери 3D-витрину реквизита.\nВидео — только на фоне; без отдельного плеера."

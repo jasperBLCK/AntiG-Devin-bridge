@@ -45,6 +45,10 @@ def shareable_path(path: str) -> bool:
     )
 
 
+def editable_path(path: str) -> bool:
+    return shareable_path(path) and not path.lower().startswith((".github/", ".gitmodules"))
+
+
 class GitHub:
     def __init__(self, key: str) -> None:
         self.key = key
@@ -75,14 +79,35 @@ class GitHub:
             if not isinstance(path, str) or not shareable_path(path) or type(size) is not int or size < 0:
                 continue
             if workspace:
-                found.append({"path": path, "size": size, "blob": sha(item.get("sha"))})
+                found.append({"path": path, "size": size, "blob": sha(item.get("sha")), "mode": item["mode"]})
             elif 0 < size <= MAX_FILE_BYTES:
                 found.append({"path": path})
         found.sort(key=lambda entry: (entry["path"].count("/"), entry["path"].casefold(), entry["path"]))
         limit = MAX_WORKSPACE_PATHS if workspace else 800
-        payload = {"files": found[:limit]} if workspace else {"paths": [item["path"] for item in found[:limit]]}
+        payload = ({"files": found[:limit], "tree_sha": tree_sha} if workspace
+                   else {"paths": [item["path"] for item in found[:limit]]})
         return {"repo": repo, "ref": target, "commit": commit_sha, **payload,
                 "truncated": len(found) > limit or bool(tree.get("truncated"))}
+
+    def publish_branch(
+        self, repo: str, commit: str, base_tree: str, branch: str, message: str, edits: list[dict[str, str]],
+    ) -> dict[str, str]:
+        if not self.key or not valid_repo(repo) or not re.fullmatch(r"bridge/[a-f0-9]{32}", branch):
+            raise ProviderError("Недопустимая настройка публикации.")
+
+        def create(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+            return request_json(f"https://api.github.com/repos/{repo}/git/{endpoint}", self.key, payload,
+                                headers={**GITHUB_HEADERS, "X-GitHub-Api-Version": "2022-11-28"})
+
+        tree = sha(create("trees", {"base_tree": sha(base_tree), "tree": edits}).get("sha"))
+        head = sha(create("commits", {"message": message, "tree": tree, "parents": [sha(commit)]}).get("sha"))
+        ref = f"refs/heads/{branch}"
+        created = create("refs", {"ref": ref, "sha": head})
+        obj = created.get("object")
+        if created.get("ref") != ref or not isinstance(obj, dict) or obj.get("sha") != head:
+            raise ProviderError("GitHub не подтвердил создание ветки. Проверь ветки перед повтором.")
+        return {"branch": branch, "commit": head, "url": f"https://github.com/{repo}/tree/{branch}",
+                "commit_url": f"https://github.com/{repo}/commit/{head}"}
 
     def blob(self, repo: str, blob: str) -> str:
         obj = self._read(repo, f"/git/blobs/{sha(blob)}")

@@ -30,18 +30,30 @@ from orchestration import (
     MEDIA_MODELS,
     REVIEWER,
     ROUTER,
+    MediaKind,
     demo_decision,
     explicit_media,
     handoff,
     parse_decision,
     with_skills,
 )
-from providers import GROK_MODEL, AntiG, ChatUsage, Devin, GrokProvider, ProviderError
+from providers import (
+    GROK_MODEL,
+    AntiG,
+    ChatUsage,
+    Devin,
+    GrokProvider,
+    ProviderError,
+    image_type,
+    media_download,
+)
 from repository import (
     DEMO_FILES,
     MAX_CONTEXT_CHARS,
     MAX_FILES,
+    MAX_WORKSPACE_BYTES,
     GitHub,
+    editable_path,
     shareable_path,
     valid_repo,
 )
@@ -51,6 +63,8 @@ from workspace import Revision, Workspace
 ROOT = Path(__file__).resolve().parent
 DEFAULT_ACU = 5
 MAX_ACU = 100
+MAX_ASSET_BYTES = 20 * 1024 * 1024
+DEFAULT_MEDIA_HOSTS = ("vidgen.x.ai", "imgen.x.ai", "assets.grok.com")
 logger = logging.getLogger(__name__)
 PUBLIC_COLUMNS = (
     "id", "mode", "route", "prompt", "model", "repo", "ref", "commit_sha", "created_at", "status",
@@ -77,6 +91,9 @@ class Settings:
     xai_key: str = ""
     grok_provider: GrokProvider = "antig"
     admin_key: str = ""
+    github_write_token: str = ""
+    github_write_repos: tuple[str, ...] = ()
+    media_hosts: tuple[str, ...] = DEFAULT_MEDIA_HOSTS
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -92,6 +109,11 @@ class Settings:
             xai_key=os.getenv("XAI_API_KEY", "").strip(),
             grok_provider="xai" if os.getenv("BRIDGE_GROK_PROVIDER") == "xai" else "antig",
             admin_key=os.getenv("BRIDGE_ADMIN_KEY", ""),
+            github_write_token=os.getenv("GITHUB_WRITE_TOKEN", "").strip(),
+            github_write_repos=tuple(repo.strip().lower() for repo in os.getenv("BRIDGE_GITHUB_WRITE_REPOS", "").split(",")
+                                     if valid_repo(repo.strip())),
+            media_hosts=DEFAULT_MEDIA_HOSTS + tuple(host.strip().lower() for host in os.getenv("BRIDGE_MEDIA_HOSTS", "").split(",")
+                                                   if re.fullmatch(r"[a-zA-Z0-9.-]+", host.strip())),
         )
 
 
@@ -104,6 +126,21 @@ class RepoBrowse(BaseModel):
 class RepoPreview(RepoBrowse):
     commit: Commit
     paths: list[SourcePath] = Field(min_length=1, max_length=MAX_FILES)
+
+
+class WorkspaceEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: SourcePath
+    blob: Commit
+    stamp: FileStamp
+    text: str = Field(max_length=MAX_WORKSPACE_BYTES)
+
+
+class WorkspacePublish(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    commit: Commit
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    edits: list[WorkspaceEdit] = Field(min_length=1, max_length=12)
 
 
 class ContextFiles(BaseModel):
@@ -173,6 +210,7 @@ class Store:
                 "devin_acu": "REAL",
                 "grok_provider": "TEXT NOT NULL DEFAULT 'antig'",
                 "hidden": "INTEGER NOT NULL DEFAULT 0",
+                "pipeline": "TEXT NOT NULL DEFAULT '{}'",
             }
             for column, schema in additions.items():
                 if column not in columns:
@@ -190,7 +228,7 @@ class Store:
 
     @staticmethod
     def decode(row: sqlite3.Row) -> dict[str, Any]:
-        return {**dict(row), "activity": json.loads(row["activity"]), "skills": json.loads(row["skills"])}
+        return {**dict(row), **{key: json.loads(row[key]) for key in ("activity", "skills", "pipeline")}}
 
     def get(self, job_id: str) -> dict[str, Any]:
         with closing(self.connect()) as conn:
@@ -208,7 +246,7 @@ class Store:
     def due(self, before: float) -> list[str]:
         with closing(self.connect()) as conn:
             rows = conn.execute("""
-                SELECT id FROM jobs WHERE remote_id IS NOT NULL AND status IN ('running', 'paused')
+                SELECT id FROM jobs WHERE (remote_id IS NOT NULL OR pipeline <> '{}') AND status IN ('running', 'paused')
                 AND last_polled <= CASE WHEN status = 'paused' THEN ? - 30 ELSE ? END
                 ORDER BY last_polled LIMIT 32
             """, (before, before)).fetchall()
@@ -250,11 +288,12 @@ class Store:
         with closing(self.connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             ids = [row["id"] for row in conn.execute(
-                "SELECT id FROM jobs WHERE NOT hidden AND status IN ('done', 'ended', 'failed', 'awaiting')")]
+                "SELECT id FROM jobs WHERE NOT hidden AND mode <> 'workspace' "
+                "AND status IN ('done', 'ended', 'failed', 'awaiting')")]
             conn.execute("""
                 UPDATE jobs SET hidden = 1, prompt = '', result = NULL, plan = NULL, reason = NULL, error = NULL,
-                                media_url = NULL, activity = '{}', skills = '[]', pr_url = NULL
-                WHERE NOT hidden AND status IN ('done', 'ended', 'failed', 'awaiting')
+                                media_url = NULL, activity = '{}', skills = '[]', pipeline = '{}', pr_url = NULL
+                WHERE NOT hidden AND mode <> 'workspace' AND status IN ('done', 'ended', 'failed', 'awaiting')
             """)
         return ids
 
@@ -269,15 +308,26 @@ class Store:
                   task.max_acu, iso_now(), task.review, json.dumps(skills, ensure_ascii=False), provider))
         return self.get(job_id)
 
+    def open_workspace(self, repo: str, ref: str, commit: str) -> str:
+        job_id = uuid4().hex
+        now = iso_now()
+        with closing(self.connect()) as conn, conn:
+            conn.execute("""
+                INSERT INTO jobs (id, mode, prompt, status, repo, ref, commit_sha, created_at, finished_at)
+                VALUES (?, 'workspace', 'Рабочая область GitHub', 'done', ?, ?, ?, ?, ?)
+            """, (job_id, repo, ref, commit, now, now))
+        return job_id
+
     def apply(self, job_id: str, update: dict[str, Any], previous_status: str) -> bool:
         keys = {
             "status", "result", "media_url", "remote_id", "session_url", "pr_url", "progress", "error",
             "model", "route", "reason", "plan", "activity", "routed_at", "finished_at", "reviewed_at", "last_polled",
-            "devin_acu",
+            "devin_acu", "pipeline",
         }
         columns = [key for key in update if key in keys]
         assignments = ", ".join(f"{column} = ?" for column in columns)
-        args = [json.dumps(update[key], ensure_ascii=False) if key == "activity" else update[key] for key in columns]
+        args = [json.dumps(update[key], ensure_ascii=False) if key in {"activity", "pipeline"} else update[key]
+                for key in columns]
         with closing(self.connect()) as conn, conn:
             result = conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ? AND status = ?",
                                   (*args, job_id, previous_status))
@@ -291,6 +341,10 @@ def public_job(job: dict[str, Any], *, full: bool = True) -> dict[str, Any]:
         result["skills"] = [{key: skill[key] for key in ("id", "title")} for skill in job["skills"]]
         result["activity"] = {key: val for key, val in job["activity"].items()
                               if key not in {"cursor", "pr_checked", "pr_url"}}
+        result["assets"] = [
+            {key: asset[key] for key in ("kind", "prompt", "status", "model", "media_url", "progress") if key in asset}
+            for asset in job["pipeline"].get("assets", [])
+        ]
     return result
 
 
@@ -323,6 +377,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         return next((path for kind in ("jpeg", "png", "webp") if (path := media_dir / f"{job_id}.{kind}").is_file()), None)
 
     github = GitHub(settings.github_read_token)
+    git_writer = GitHub(settings.github_write_token)
     workspace = Workspace(github, settings.demo)
     devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
 
@@ -332,11 +387,11 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def redact(text: str) -> str:
         with keys_lock:
             keys = (*env_keys.values(), *runtime_keys.values(), settings.admin_key,
-                    settings.devin_key, settings.github_read_token)
+                    settings.devin_key, settings.github_read_token, settings.github_write_token)
         for secret in keys:
             if secret:
                 text = text.replace(secret, "[скрыто]")
-        return re.sub(r"\b(?:ag_|xai-)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
+        return re.sub(r"\b(?:ag_|xai-|gh[pousr]_|github_pat_)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
 
     def read_files(repo: str, commit: str, paths: list[str]) -> list[dict[str, str]]:
         if len(set(paths)) != len(paths) or not all(map(shareable_path, paths)):
@@ -349,6 +404,25 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if sum(len(item["text"]) for item in files) > MAX_CONTEXT_CHARS:
             raise ProviderError("Слишком большой контекст. Выбери меньше файлов.")
         return files
+
+    def start_devin(
+        job: dict[str, Any], draft_pr: bool, uploads: list[tuple[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        prompt = handoff(job["prompt"], job["plan"], job["repo"], job["ref"], job["commit_sha"],
+                         inspect=job["route"] == "inspect", draft_pr=draft_pr, skills=job["skills"])
+        if uploads:
+            names = ", ".join(name for name, _ in uploads)
+            prompt += (f"\n\nФайлы к исходной задаче, уже сгенерированные Grok: {names}. "
+                       "Используй приложенные файлы в проекте по исходной задаче. Не генерируй их повторно.")
+        if settings.demo:
+            return {"status": "running", "remote_id": "demo"}
+        if not devin:
+            raise ProviderError("Задача требует Devin. Добавь ключ Devin и запусти её снова.")
+        result = devin.start(prompt, job["repo"], job["max_acu"], [url for _, url in uploads] if uploads else None)
+        # The create response has no final report; even an ended session needs its first poll.
+        if result["status"] == "ended":
+            result["status"] = "running"
+        return result
 
     def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]], grok: AntiG) -> None:
         try:
@@ -368,22 +442,16 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 if not task.repo:
                     update.update(status="done", route="clarify", reason="Для работы Devin нужен репозиторий.",
                                   result="Укажи репозиторий GitHub и повтори задачу.")
+                elif decision.assets:
+                    if not settings.demo and not devin:
+                        raise ProviderError("Задача требует Devin. Добавь ключ Devin и запусти её снова.")
+                    update.update(status="awaiting", plan=content, pipeline={"draft_pr": task.draft_pr, "assets": [
+                        {"kind": kind, "prompt": redact(prompt), "status": "planned", "model": MEDIA_MODELS[kind]}
+                        for kind, prompt in decision.assets
+                    ]})
                 else:
                     store.apply(job_id, {**update, "plan": content}, "sending")
-                    prompt = handoff(
-                        redact(task.prompt), content, task.repo, task.ref, task.context.commit if task.context else None,
-                        inspect=decision.route == "inspect", draft_pr=task.draft_pr,
-                        skills=recipes,
-                    )
-                    if settings.demo:
-                        update.update(status="running", remote_id="demo")
-                    elif devin:
-                        update.update(devin.start(prompt, task.repo, task.max_acu))
-                        # The create response has no final report; even an ended session needs its first poll.
-                        if update["status"] == "ended":
-                            update["status"] = "running"
-                    else:
-                        raise ProviderError("Задача требует Devin. Добавь ключ Devin и запусти её снова.")
+                    update.update(start_devin(store.get(job_id), task.draft_pr))
             elif decision.route in MEDIA_MODELS:
                 update.update(status="awaiting", model=MEDIA_MODELS[decision.route])
             else:
@@ -416,6 +484,91 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if update.get("status") in {"done", "failed"}:
             update["finished_at"] = iso_now()
         store.apply(job["id"], update, "sending")
+
+    def asset_path(job_id: str, kind: str, ext: str) -> Path:
+        return media_dir / f"{job_id}-asset-{kind}.{ext}"
+
+    def save_asset(job_id: str, asset: dict[str, Any], result: dict[str, Any]) -> None:
+        kind = asset["kind"]
+        raw = result["media"] if "media" in result else media_download(
+            result["media_url"], settings.media_hosts, MAX_ASSET_BYTES)
+        ext = image_type(raw) if kind == "image" else "mp4" if raw[4:8] == b"ftyp" else ""
+        if not ext or len(raw) > MAX_ASSET_BYTES:
+            raise ProviderError("Формат медиа не поддерживается или превышен лимит файла.")
+        media_dir.mkdir(parents=True, exist_ok=True)
+        asset_path(job_id, kind, ext).write_bytes(raw)
+        asset.update(status="ready", ext=ext, progress=100, media_url=f"/api/jobs/{job_id}/assets/{kind}")
+
+    def finish_pipeline(job: dict[str, Any]) -> None:
+        pipeline, job_id = job["pipeline"], job["id"]
+        uploads = []
+        if not settings.demo:
+            if not devin:
+                raise ProviderError("Ключ Devin не настроен. Медиа сохранены в задаче.")
+            for asset in pipeline["assets"]:
+                kind, ext = asset["kind"], asset["ext"]
+                name = f"bridge-{kind}.{ext}"
+                mime = "video/mp4" if kind == "video" else f"image/{ext}"
+                url = devin.upload(name, asset_path(job_id, kind, ext).read_bytes(), mime)
+                uploads.append((name, url))
+        update = start_devin(job, pipeline["draft_pr"], uploads)
+        store.apply(job_id, {**update, "error": None}, "sending")
+
+    def pipeline_error(job: dict[str, Any], exc: Exception) -> None:
+        error = str(exc) if isinstance(exc, ProviderError) else "Не удалось сохранить или открыть медиафайл."
+        store.apply(job["id"], {"pipeline": job["pipeline"], "status": "failed", "error": error,
+                                "finished_at": iso_now()}, "sending")
+
+    def generate_pipeline(job: dict[str, Any]) -> None:
+        pipeline = job["pipeline"]
+        try:
+            if settings.demo:
+                for asset in pipeline["assets"]:
+                    asset["status"] = "demo"
+                    if asset["kind"] == "image":
+                        asset["media_url"] = "/static/sample.svg"
+            else:
+                grok = require_grok(job["grok_provider"])
+                # Complete the image before starting a remote video job.
+                for asset in sorted(pipeline["assets"], key=lambda item: item["kind"]):
+                    if asset["kind"] == "image":
+                        save_asset(job["id"], asset, grok.image(asset["prompt"], asset["model"]))
+                        store.apply(job["id"], {"pipeline": pipeline}, "sending")
+                    else:
+                        started = grok.start_video(asset["prompt"], asset["model"])
+                        asset.update(status="running", remote_id=started["remote_id"])
+                        store.apply(job["id"], {"pipeline": pipeline, "status": "running"}, "sending")
+                        return
+            store.apply(job["id"], {"pipeline": pipeline}, "sending")
+            finish_pipeline(job)
+        except (OSError, ProviderError) as exc:
+            pipeline_error(job, exc)
+
+    def advance_pipeline(job: dict[str, Any]) -> None:
+        pipeline, job_id = job["pipeline"], job["id"]
+        asset = next((item for item in pipeline["assets"] if item["status"] == "running"), None)
+        if not asset:
+            return
+        try:
+            result = require_grok(job["grok_provider"]).video_status(asset["remote_id"])
+        except ProviderError as exc:
+            store.apply(job_id, {"last_polled": time(), "error": f"Статус видео не обновился: {exc}"}, "running")
+            return
+        if result["status"] == "running":
+            asset["progress"] = result.get("progress")
+            store.apply(job_id, {"pipeline": pipeline, "error": None, "last_polled": time()}, "running")
+            return
+        if not store.apply(job_id, {"status": "sending", "last_polled": time()}, "running"):
+            return
+        try:
+            if result["status"] != "done":
+                asset["status"] = "failed"
+                raise ProviderError(result["error"])
+            save_asset(job_id, asset, result)
+            store.apply(job_id, {"pipeline": pipeline}, "sending")
+            finish_pipeline(job)
+        except (OSError, ProviderError) as exc:
+            pipeline_error(job, exc)
 
     def review(job: dict[str, Any], report: dict[str, str]) -> None:
         try:
@@ -488,6 +641,9 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         try:
             job = store.get(job_id)
             status, remote_id, route = job["status"], job["remote_id"], job["route"] or job["mode"]
+            if status == "running" and not remote_id and job["pipeline"]:
+                advance_pipeline(job)
+                return
             if not remote_id or status not in {"running", "paused"}:
                 return
             try:
@@ -570,6 +726,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     async def invalid_request(request: Request, exc: RequestValidationError) -> Response:
         if request.url.path == "/api/settings":
             return JSONResponse({"detail": "Проверь поля настроек."}, status_code=422)
+        if request.url.path.endswith("/workspace/publish"):
+            return JSONResponse({"detail": "Проверь поля запроса и ограничения размера."}, status_code=422)
         return await request_validation_exception_handler(request, exc)
 
     @app.middleware("http")
@@ -605,6 +763,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.get("/skills")
     def skills_page() -> FileResponse:
+        return FileResponse(ROOT / "static" / "workspace.html")
+
+    @app.get("/workspace")
+    def workspace_landing() -> FileResponse:
         return FileResponse(ROOT / "static" / "workspace.html")
 
     @app.get("/workspace/{job_id}")
@@ -663,6 +825,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         for job_id in ids:
             if path := media_file(job_id):
                 path.unlink(missing_ok=True)
+            for path in media_dir.glob(f"{job_id}-asset-*"):
+                path.unlink(missing_ok=True)
         return {"cleared": len(ids)}
 
     @app.get("/api/jobs/{job_id}/media")
@@ -673,6 +837,15 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             raise HTTPException(404, "Файл не найден.")
         return FileResponse(path, media_type=f"image/{path.suffix[1:]}")
 
+    @app.get("/api/jobs/{job_id}/assets/{kind}")
+    def job_asset(job_id: JobID, kind: MediaKind) -> FileResponse:
+        asset = next((item for item in store.get(job_id)["pipeline"].get("assets", [])
+                      if item["kind"] == kind and item["status"] == "ready"), None)
+        if not asset or not (path := asset_path(job_id, kind, asset["ext"])).is_file():
+            raise HTTPException(404, "Файл не найден.")
+        mime = "video/mp4" if kind == "video" else f"image/{asset['ext']}"
+        return FileResponse(path, media_type=mime)
+
     @app.get("/api/overview")
     def overview() -> dict[str, Any]:
         return store.overview(settings.demo)
@@ -680,6 +853,21 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @app.get("/api/jobs/{job_id}")
     def job(job_id: JobID) -> dict[str, Any]:
         return public_job(store.get(job_id))
+
+    def can_publish(repo: str) -> bool:
+        return bool(not settings.demo and settings.admin_key and git_writer.key
+                    and repo.lower() in settings.github_write_repos)
+
+    @app.post("/api/workspaces", status_code=201)
+    def open_workspace(target: RepoBrowse) -> dict[str, str]:
+        if not valid_repo(target.repo):
+            raise HTTPException(422, "Укажи репозиторий в формате владелец/репозиторий.")
+        try:
+            tree = workspace.tree({"id": "", "repo": target.repo, "ref": target.ref,
+                                   "commit_sha": None, "pr_url": None}, "base")
+        except ProviderError as exc:
+            raise HTTPException(502, f"GitHub: {exc}") from None
+        return {"id": store.open_workspace(tree["repo"], tree["ref"], tree["commit"])}
 
     @app.get("/api/jobs/{job_id}/workspace/tree")
     def workspace_tree(job_id: JobID, revision: Revision = "base") -> dict[str, Any]:
@@ -689,21 +877,67 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if revision == "pr" and not current["pr_url"]:
             raise HTTPException(404, "У задачи пока нет PR.")
         try:
-            return workspace.tree(current, revision)
+            return {**workspace.tree(current, revision),
+                    "can_publish": revision == "base" and can_publish(current["repo"]),
+                    "demo": settings.demo}
         except ProviderError as exc:
             raise HTTPException(502, f"GitHub: {exc}") from None
 
     @app.get("/api/jobs/{job_id}/workspace/file")
     def workspace_file(
         job_id: JobID, repo: Repo, commit: Commit, path: SourcePath, blob: Commit, stamp: FileStamp,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         current = store.get(job_id)
         if not current["repo"] or not workspace.allowed(job_id, repo, commit, path, blob, stamp):
             raise HTTPException(409, "Файл не относится к открытому снимку. Обнови дерево.")
         try:
-            return {"path": path, "text": redact(workspace.file(repo, path, blob))}
+            original = workspace.file(repo, path, blob)
+            text = redact(original)
+            return {"path": path, "text": text, "editable": original == text and editable_path(path)}
         except ProviderError as exc:
             raise HTTPException(422, str(exc)) from None
+
+    @app.post("/api/jobs/{job_id}/workspace/publish", status_code=201)
+    def publish_workspace(job_id: JobID, change: WorkspacePublish) -> dict[str, str]:
+        require_admin_enabled()
+        current = store.get(job_id)
+        repo = current["repo"]
+        if not repo or not can_publish(repo):
+            raise HTTPException(403, "Публикация не настроена для этого репозитория.")
+        paths = {item.path for item in change.edits}
+        if (len(paths) != len(change.edits) or not all(map(editable_path, paths))
+                or any(ord(char) < 32 or ord(char) == 127 for char in change.message)
+                or redact(change.message) != change.message):
+            raise HTTPException(422, "Проверь список файлов и сообщение коммита.")
+        try:
+            if any("\0" in item.text or len(item.text.encode()) > MAX_WORKSPACE_BYTES
+                   or redact(item.text) != item.text for item in change.edits):
+                raise HTTPException(422, "Недопустимое содержимое. Проверь размер и удали секреты.")
+        except UnicodeError:
+            raise HTTPException(422, "Текст файлов должен быть в UTF-8.") from None
+        if not all(workspace.allowed(job_id, repo, change.commit, e.path, e.blob, e.stamp) for e in change.edits):
+            raise HTTPException(409, "Файл не относится к снимку. Обнови проводник перед публикацией.")
+        try:
+            tree = github.tree(repo, current["commit_sha"] or current["ref"], workspace=True)
+            if tree["commit"] != change.commit:
+                raise HTTPException(409, "Исходная ветка изменилась. Сохрани правки и открой свежий снимок.")
+            snapshot = {entry["path"]: entry for entry in tree["files"]}
+            edits = []
+            for item in change.edits:
+                file = snapshot.get(item.path)
+                if not file or file["blob"] != item.blob:
+                    raise HTTPException(409, "Исходный файл изменился. Обнови проводник.")
+                original = github.blob(repo, item.blob)
+                if redact(original) != original:
+                    raise HTTPException(422, "Нельзя публиковать файл со скрытыми участками.")
+                if original != item.text:
+                    edits.append({"path": item.path, "mode": file["mode"], "type": "blob", "content": item.text})
+            if not edits:
+                raise HTTPException(422, "Нет изменений для коммита.")
+            return git_writer.publish_branch(repo, change.commit, tree["tree_sha"], f"bridge/{uuid4().hex}",
+                                             change.message, edits)
+        except ProviderError as exc:
+            raise HTTPException(502, f"GitHub: {exc}") from None
 
     @app.post("/api/repo/tree")
     def repo_tree(target: RepoBrowse) -> dict[str, Any]:
@@ -750,9 +984,11 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     @app.post("/api/jobs/{job_id}/generate", status_code=202)
     def approve_media(job_id: JobID, background: BackgroundTasks) -> dict[str, Any]:
         current = store.get(job_id)
-        if current["route"] not in MEDIA_MODELS or not store.apply(job_id, {"status": "sending"}, "awaiting"):
+        pipeline = current["route"] == "implement" and bool(current["pipeline"])
+        if ((not pipeline and current["route"] not in MEDIA_MODELS)
+                or not store.apply(job_id, {"status": "sending"}, "awaiting")):
             raise HTTPException(409, "Генерация уже запущена или эта задача не требует подтверждения.")
-        background.add_task(generate, current)
+        background.add_task(generate_pipeline if pipeline else generate, current)
         return public_job(store.get(job_id))
 
     @app.post("/api/jobs/{job_id}/refresh")

@@ -9,6 +9,7 @@ from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
 
 GROK_MODEL = "grok-4.7"
 GrokProvider = Literal["antig", "xai"]
@@ -131,6 +132,22 @@ def image_type(raw: bytes) -> str:
     return ""
 
 
+def media_download(url: str, hosts: tuple[str, ...], limit: int) -> bytes:
+    if not https_url(url):
+        raise ProviderError("Некорректная ссылка провайдера на файл.")
+    try:
+        parts = urlsplit(url)
+        if parts.hostname not in hosts or parts.port not in (None, 443):
+            raise ProviderError("Хост медиа не разрешён. Проверь BRIDGE_MEDIA_HOSTS на сервере.")
+        with build_opener(NoRedirect()).open(Request(url), timeout=25) as response:
+            raw = response.read(limit + 1)
+    except (OSError, ValueError):
+        raise ProviderError("Медиафайл не удалось получить без перенаправлений.") from None
+    if len(raw) > limit:
+        raise ProviderError("Медиафайл превысил лимит размера для вложений.")
+    return raw
+
+
 def identifier(value: Any) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
         raise ProviderError("Сервис не вернул корректный ID задачи.")
@@ -212,7 +229,25 @@ class Devin:
         self.key = key
         self.base = f"https://api.devin.ai/v3/organizations/{identifier(org)}/sessions"
 
-    def start(self, prompt: str, repo: str, max_acu: int) -> dict[str, Any]:
+    def upload(self, name: str, content: bytes, mime: str) -> str:
+        boundary = "----bridge-" + uuid4().hex
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\n'
+                f'Content-Type: {mime}\r\n\r\n').encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        req = Request(self.base.removesuffix("/sessions") + "/attachments", data=body, headers={
+            "Authorization": f"Bearer {self.key}", "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        })
+        try:
+            with build_opener(NoRedirect()).open(req, timeout=90) as response:
+                data = json.loads(response.read(64_000))
+        except (OSError, ValueError):
+            raise ProviderError("Devin не принял вложение. Проверь доступ и лимит файла.") from None
+        url = https_url(data.get("url")) if isinstance(data, dict) else ""
+        if not url or urlsplit(url).hostname not in {"app.devin.ai", "api.devin.ai"}:
+            raise ProviderError("Devin не вернул ссылку на вложение.")
+        return url
+
+    def start(self, prompt: str, repo: str, max_acu: int, attachment_urls: list[str] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "prompt": prompt, "repos": [repo], "max_acu_limit": max_acu, "tags": ["antig-bridge"],
             "structured_output_required": True,
@@ -223,6 +258,8 @@ class Devin:
                 "additionalProperties": False,
             },
         }
+        if attachment_urls:
+            payload["attachment_urls"] = attachment_urls
         data = request_json(self.base, self.key, payload)
         remote_id = identifier(data.get("session_id"))
         return self._status(data, remote_id)

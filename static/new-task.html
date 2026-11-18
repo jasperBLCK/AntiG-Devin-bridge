@@ -18,6 +18,7 @@
       <a href="/"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#layout"/></svg>Обзор</a>
       <a href="/tasks/new" aria-current="page"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plus"/></svg>Новая задача</a>
       <a href="/sessions"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#history"/></svg>Сессии</a>
+      <a href="/workspace"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#code"/></svg>Рабочая область</a>
       <a href="/skills"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#plugins"/></svg>Скиллы</a>
       <a href="/settings"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Настройки</a>
     </nav>
@@ -39,6 +40,7 @@
         <form id="job-form">
           <label for="prompt">Что нужно сделать?</label>
           <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: исправь импорт пустого CSV и добавь регрессионный тест"></textarea>
+          <p class="muted">Нужны фото или видео для проекта? Опиши их здесь. Генерацию можно подтвердить в той же задаче.</p>
           <div id="project-fields" class="project-fields">
             <div class="project-inputs">
               <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
@@ -64,7 +66,7 @@
           <fieldset id="devin-fields" class="devin-fields" hidden disabled>
             <legend>Если задачу возьмёт Devin</legend>
             <div class="budget"><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
-            <label class="confirmation"><input id="draft-pr" type="checkbox"> Разрешить черновик PR (без merge)</label>
+            <label class="confirmation"><input id="draft-pr" type="checkbox"> Devin: push в рабочую ветку и черновик PR (без merge)</label>
             <label class="confirmation"><input id="review" type="checkbox" checked> Дать Grok разобрать итоговый отчёт Devin</label>
           </fieldset>
           <fieldset class="task-skills">

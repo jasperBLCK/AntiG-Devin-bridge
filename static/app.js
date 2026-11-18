@@ -5,7 +5,7 @@ const form = $("job-form");
 const params = new URLSearchParams(location.search);
 const routes = {
   auto: "Grok распределяет", answer: "Ответ Grok", clarify: "Уточнение Grok",
-  inspect: "Разбор Devin", implement: "Реализация Devin", grok: "План Grok", devin: "Devin",
+  inspect: "Разбор Devin", implement: "Реализация Devin", grok: "План Grok", devin: "Devin", workspace: "Рабочая область",
   image: "Изображение AntiG", video: "Видео AntiG",
 };
 const labels = {
@@ -279,6 +279,11 @@ function currentStage(job) {
     return [job.reviewed_at ? "Grok" : routeTitle(job), labels[job.status]];
   }
   if (route === "auto" || route === "grok") return ["Grok", "Распределяет задачу"];
+  if (job.assets?.length && !job.session_url && !job.assets.every((asset) => asset.status === "demo")) {
+    if (job.status === "awaiting") return ["Grok Imagine", "Ждёт подтверждения"];
+    if (job.assets.every((asset) => asset.status === "ready")) return ["Мост", "Передаёт файлы Devin"];
+    return ["Grok Imagine", "Готовит файлы для проекта"];
+  }
   if (["image", "video"].includes(route)) {
     return ["AntiG Imagine", job.status === "awaiting" ? "Ждёт подтверждения генерации" : "Генерирует медиа"];
   }
@@ -343,7 +348,8 @@ function showActivity(root, job) {
 }
 
 function confirmMedia(root, job) {
-  const button = element("button", "Подтвердить генерацию", "primary");
+  const bundled = Boolean(job.assets?.length);
+  const button = element("button", bundled ? "Сгенерировать и передать Devin" : "Подтвердить генерацию", "primary");
   button.type = "button";
   button.addEventListener("click", async () => {
     button.disabled = true;
@@ -355,7 +361,38 @@ function confirmMedia(root, job) {
       button.disabled = false;
     }
   });
-  root.append(element("p", "Модель: " + job.model + ". В реальном режиме генерация расходует квоту.", "muted"), button);
+  root.append(element("p", bundled ? "Проверь запросы ниже. Генерация расходует квоту; затем запустится одна сессия Devin."
+    : "Модель: " + job.model + ". В реальном режиме генерация расходует квоту.", "muted"), button);
+}
+
+function showAssets(root, job) {
+  if (!job.assets?.length) return;
+  const section = element("section", "", "task-assets");
+  section.append(element("h3", "Медиа проекта"));
+  const states = { planned: "Запланировано", running: "Генерация", ready: "Готово", failed: "Ошибка", demo: "Демо" };
+  for (const asset of job.assets) {
+    const kind = asset.kind === "video" ? "Видео" : "Изображение";
+    const item = element("details", "", "job-journal task-asset");
+    item.id = "asset-" + asset.kind;
+    const progress = asset.status === "running" && Number.isInteger(asset.progress) ? " · " + asset.progress + "%" : "";
+    item.append(element("summary", kind + " · " + states[asset.status] + progress),
+      element("p", asset.model, "mono muted"), element("pre", asset.prompt));
+    if (asset.media_url) {
+      const preview = document.createElement(asset.kind === "video" ? "video" : "img");
+      preview.src = asset.media_url;
+      if (asset.kind === "video") {
+        preview.controls = true;
+        preview.playsInline = true;
+        preview.preload = "none";
+      } else {
+        preview.alt = "Результат Grok Imagine для проекта";
+        preview.loading = "lazy";
+      }
+      item.append(preview, link("Открыть файл", asset.media_url));
+    }
+    section.append(item);
+  }
+  root.append(section);
 }
 
 let rendered = "";
@@ -408,6 +445,7 @@ function showResult() {
     plan.append(element("summary", "Что Grok поручил Devin"), element("pre", job.plan));
     root.append(plan);
   }
+  showAssets(root, job);
   if (job.status === "awaiting") confirmMedia(root, job);
   showActivity(root, job);
   if (job.result) {
@@ -426,7 +464,9 @@ function showResult() {
     root.append(media);
     if (!state.config?.demo) root.append(element("p", "Ссылка может истечь — сохрани медиа после генерации.", "muted"));
   }
-  for (const node of root.querySelectorAll("details")) node.open = expanded.has(node.id);
+  for (const node of root.querySelectorAll("details")) {
+    node.open = expanded.has(node.id) || (job.status === "awaiting" && node.classList.contains("task-asset"));
+  }
 }
 
 async function load() {
@@ -579,10 +619,10 @@ async function init() {
 }
 
 if (form) {
-  if (params.get("skill")) {
-    const repo = params.get("repo");
-    const ref = params.get("ref");
-    if (repo && repo.length <= 200 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) $("repo").value = repo;
+  const repo = params.get("repo");
+  const ref = params.get("ref");
+  if (repo && repo.length <= 200 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    $("repo").value = repo;
     if (ref && ref.length <= 200 && /^[A-Za-z0-9_./-]+$/.test(ref)) $("git-ref").value = ref;
   }
   void loadTaskSkills();

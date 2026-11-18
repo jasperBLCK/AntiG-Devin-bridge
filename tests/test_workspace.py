@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app import Settings, create_app
 
 WRITE = {"X-Bridge-Request": "1"}
+AUTH = ("bridge", "demo-admin-for-tests")
 BASE = "a" * 40
 HEAD = "b" * 40
 TREE = "c" * 40
@@ -81,6 +82,90 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             gh.assert_not_called()
             providers.assert_not_called()
+
+    def test_open_workspace_does_not_dispatch_or_disappear_when_tasks_are_cleared(self):
+        with self.client() as client, patch("providers.request_json") as providers, patch("repository.request_json") as gh:
+            response = client.post("/api/workspaces", json={"repo": "demo/csv", "ref": "main"}, headers=WRITE)
+            self.assertEqual(response.status_code, 201)
+            job_id = response.json()["id"]
+            self.assertEqual(client.get(f"/api/jobs/{job_id}").json()["mode"], "workspace")
+            tree = self.get_tree(client, job_id).json()
+            self.assertTrue(tree["demo"])
+            self.assertFalse(tree["can_publish"])
+            self.assertEqual(client.post("/api/jobs/clear", headers=WRITE).json(), {"cleared": 0})
+            self.assertEqual(self.get_tree(client, job_id).status_code, 200)
+            providers.assert_not_called()
+            gh.assert_not_called()
+
+    def test_authenticated_publication_only_creates_new_branch_from_signed_snapshot(self):
+        settings = Settings(self.db, github_read_token="reader", admin_key=AUTH[1], github_write_token="writer",
+                            github_write_repos=("test/repo",))
+        reads = [
+            {"sha": BASE, "commit": {"tree": {"sha": TREE}}},
+            {"tree": [leaf("main.py", 7, "100755")]},
+        ]
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("repository.request_json") as gh:
+            client.auth = AUTH
+            gh.side_effect = reads + reads
+            opened = client.post("/api/workspaces", json={"repo": "test/repo", "ref": "main"}, headers=WRITE)
+            self.assertEqual(opened.status_code, 201)
+            job_id = opened.json()["id"]
+            tree = self.get_tree(client, job_id).json()
+            self.assertTrue(tree["can_publish"])
+            edit = {"path": "main.py", "blob": BLOB, "stamp": tree["files"][0]["stamp"], "text": "print(2)\n"}
+            url = f"/api/jobs/{job_id}/workspace/publish"
+            body = {"commit": BASE, "message": "Update example", "edits": [edit]}
+            self.assertEqual(client.post(url, json=body).status_code, 403)
+            self.assertEqual(client.post(url, json={**body, "commit": HEAD}, headers=WRITE).status_code, 409)
+            self.assertEqual(client.post(url, json={**body, "edits": [{**edit, "path": ".github/workflows/test.yml"}]},
+                                         headers=WRITE).status_code, 422)
+            self.assertEqual(client.post(url, json={**body, "edits": [{**edit, "text": "ghp_" + "A" * 24}]},
+                                         headers=WRITE).status_code, 422)
+
+            gh.side_effect = None
+
+            def request(url, key, payload=None, **_):
+                if url.endswith("/commits/" + BASE):
+                    self.assertEqual(key, "reader")
+                    return reads[0]
+                if url.endswith("/git/trees/" + TREE + "?recursive=1"):
+                    return reads[1]
+                if url.endswith("/git/blobs/" + BLOB):
+                    return blob(b"print(1)\n")
+                self.assertEqual(key, "writer")
+                if url.endswith("/git/trees"):
+                    self.assertEqual(payload, {"base_tree": TREE, "tree": [
+                        {"path": "main.py", "mode": "100755", "type": "blob", "content": "print(2)\n"},
+                    ]})
+                    return {"sha": "e" * 40}
+                if url.endswith("/git/commits"):
+                    self.assertEqual(payload, {"tree": "e" * 40, "parents": [BASE], "message": "Update example"})
+                    return {"sha": HEAD}
+                self.assertTrue(url.endswith("/git/refs"))
+                self.assertRegex(payload["ref"], r"^refs/heads/bridge/[a-f0-9]{32}$")
+                return {"ref": payload["ref"], "object": {"sha": HEAD}}
+
+            gh.side_effect = request
+            response = client.post(url, json=body, headers=WRITE)
+            self.assertEqual(response.status_code, 201, response.text)
+            self.assertEqual(response.json()["commit_url"], f"https://github.com/test/repo/commit/{HEAD}")
+            self.assertEqual([call.args[0].split("/git/")[-1] for call in gh.call_args_list if len(call.args) == 3],
+                             ["trees", "commits", "refs"])
+
+    def test_repository_without_write_allowlist_cannot_publish(self):
+        settings = Settings(self.db, admin_key=AUTH[1], github_write_token="writer")
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("repository.request_json") as gh:
+            client.auth = AUTH
+            gh.side_effect = [
+                {"sha": BASE, "commit": {"tree": {"sha": TREE}}},
+                {"tree": [leaf("main.py", 7)]},
+            ]
+            opened = client.post("/api/workspaces", json={"repo": "test/repo", "ref": "main"}, headers=WRITE)
+            url = f"/api/jobs/{opened.json()['id']}/workspace/publish"
+            body = {"commit": BASE, "message": "Update", "edits": [
+                {"path": "main.py", "blob": BLOB, "stamp": "a" * 64, "text": "pass"}]}
+            self.assertEqual(client.post(url, json=body, headers=WRITE).status_code, 403)
+            self.assertEqual(gh.call_count, 2)
 
     def test_base_snapshot_uses_saved_commit_and_reads_signed_git_blob_not_a_branch(self):
         with (self.client(demo=False) as client,
