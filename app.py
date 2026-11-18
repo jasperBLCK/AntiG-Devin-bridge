@@ -423,7 +423,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             review_input = json.dumps({"request": redact(job["prompt"]), "devin_report": report}, ensure_ascii=False)
             result = ("Демо-разбор Grok: сверь проверку пустого файла с критериями задачи."
                       if settings.demo else grok_text(require_grok(job["grok_provider"]), job["id"], "review",
-                                                       review_input, with_skills(REVIEWER, job["skills"], "grok")))
+                                                       review_input, REVIEWER))
             update = {"status": "ended", "result": redact(result), "reviewed_at": iso_now()}
         except ProviderError as exc:
             update = {"status": "ended", "error": f"Разбор Grok недоступен: {exc}"}

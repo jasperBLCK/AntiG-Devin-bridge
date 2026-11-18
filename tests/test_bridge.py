@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import Settings, create_app
+from orchestration import MAX_PLAN_CHARS
 from providers import AntiG, ProviderError, collect_chat_stream, https_url
 from repository import GitHub
 
@@ -63,6 +64,34 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual((job["route"], job["status"], job["result"]), ("answer", "done", "Answer"))
             api.assert_called_once()
             self.assertEqual(api.call_args.args[2]["model"], "grok-4.7")
+
+    def test_original_goal_reaches_both_agents_separately_from_bounded_plan(self):
+        request = "Собери 3D-витрину реквизита.\nВидео — только на фоне; без отдельного плеера."
+        plan = "Сделать предложенные изменения. " * 100
+        with self.client(live=True) as client, patch("providers.request_json") as api:
+            api.side_effect = [route("implement", plan), {"session_id": "devin-sample", "status": "new"}]
+            run = self.submit(client, prompt=request, repo="test/repo")
+            self.assertEqual(run.status_code, 202)
+            messages = api.call_args_list[0].args[2]["messages"]
+            self.assertEqual(json.loads(messages[-1]["content"])["request"], request)
+            self.assertIn("не подменяй цель", messages[0]["content"])
+            handoff = api.call_args.args[2]["prompt"]
+            instructions, context = handoff.split("\n\nВходные данные:\n", 1)
+            self.assertIn("Пропускай шаги, которые меняют цель", instructions)
+            self.assertIn("уточни это вместо подмены", instructions)
+            expected_plan = plan[:MAX_PLAN_CHARS].rstrip()
+            self.assertEqual(json.loads(context), {"request": request, "grok_plan": expected_plan})
+            job = self.get(client, run)
+            self.assertEqual((job["prompt"], job["plan"]), (request, expected_plan))
+
+    def test_clarification_does_not_launch_an_alternative_task(self):
+        with self.client(live=True) as client, patch("providers.request_json") as api:
+            question = "Оставить витрину статической или подключить каталог?"
+            api.return_value = route("clarify", question)
+            run = self.submit(client, prompt="Обнови витрину", repo="test/repo")
+            job = self.get(client, run)
+            self.assertEqual((job["route"], job["status"], job["result"]), ("clarify", "done", question))
+            api.assert_called_once()
 
     def test_overview_totals_reported_usage_without_double_counting_or_faking_missing_values(self):
         with self.client(live=True) as client, patch("providers.request_json") as api:

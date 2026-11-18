@@ -217,7 +217,7 @@ class SkillMarketTests(unittest.TestCase):
             self.assertEqual(self.library(owner), [])
             self.assertEqual(self.submit(owner, [skill_id]).status_code, 422)
 
-    def test_only_selected_recipes_reach_grok_and_devin_and_survive_uninstall_for_review(self):
+    def test_selected_recipes_reach_routing_and_implementation_but_not_report_review(self):
         with self.client(demo=False) as client, patch("providers.request_json") as provider:
             provider.side_effect = [
                 route("inspect"), {"session_id": "sample", "status": "new"},
@@ -246,4 +246,6 @@ class SkillMarketTests(unittest.TestCase):
             job_id = result.json()["id"]
             final = client.post(f"/api/jobs/{job_id}/refresh", json={}, headers=WRITE).json()
             self.assertEqual(final["status"], "ended")
-            self.assertIn(RECIPES[READY]["grok"], provider.call_args.args[2]["messages"][0]["content"])
+            reviewer = provider.call_args.args[2]["messages"][0]["content"]
+            self.assertNotIn(RECIPES[READY]["grok"], reviewer)
+            self.assertIn("по исходному запросу", reviewer)
