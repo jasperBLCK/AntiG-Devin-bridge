@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#FCFCFC">
+  <title>Мост · AntiG × Devin</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="top-inner">
+      <a href="/" class="brand"><img src="/static/icon.svg" width="29" height="29" alt=""><strong>Мост</strong><span>AntiG × Devin</span></a>
+      <span class="environment" id="environment">Подключение…</span>
+    </div>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="title">
+      <div>
+        <div class="eyebrow">РАБОЧАЯ СРЕДА</div>
+        <h1 id="title">От идеи к PR</h1>
+        <p>Grok помогает разобрать задачу, Devin реализует её в репозитории.</p>
+      </div>
+      <ol class="pipeline" aria-label="Сценарий разработки">
+        <li><span>01</span> План</li><li><span>02</span> Передача</li><li><span>03</span> Реализация</li>
+      </ol>
+    </section>
+
+    <noscript>Включи JavaScript, чтобы запускать задачи.</noscript>
+
+    <div class="workspace">
+      <section class="panel compose" aria-labelledby="compose-title">
+        <div class="panel-header"><h2 id="compose-title">Новая задача</h2></div>
+        <form id="job-form">
+          <fieldset class="mode-picker">
+            <legend>Режим</legend>
+            <label><input type="radio" name="mode" value="grok" checked><span>План Grok</span></label>
+            <label><input type="radio" name="mode" value="devin"><span>Devin</span></label>
+            <label><input type="radio" name="mode" value="image"><span>Картинка</span></label>
+            <label><input type="radio" name="mode" value="video"><span>Видео</span></label>
+          </fieldset>
+          <div id="handoff" class="handoff" hidden>
+            <span>Готовый план Grok будет добавлен к запросу.</span>
+            <button id="clear-source" type="button" class="text-button">Убрать</button>
+          </div>
+          <label for="prompt" id="prompt-label">Что нужно разработать?</label>
+          <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: продумай импорт CSV с проверкой ошибок"></textarea>
+          <div id="devin-fields" class="devin-fields" hidden>
+            <div><label for="repo">Репозиторий (необязательно)</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
+            <div><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
+          </div>
+          <div id="model-field" hidden><label for="model">Модель</label><select name="model" id="model"></select></div>
+          <div class="form-actions">
+            <button type="submit" id="submit" class="primary" disabled>Получить план</button>
+            <span id="form-hint" class="muted mono">grok-4.7</span>
+          </div>
+          <p id="form-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section class="panel history" aria-labelledby="history-title">
+        <div class="panel-header">
+          <h2 id="history-title">Задачи <span id="history-count" class="count">0</span></h2>
+          <button id="reload" type="button" class="quiet">Обновить</button>
+        </div>
+        <p id="history-error" class="error" role="alert" hidden></p>
+        <div id="history-list" class="history-list"></div>
+      </section>
+    </div>
+
+    <section class="panel result-panel" id="result-panel" aria-labelledby="result-title">
+      <div class="panel-header">
+        <h2 id="result-title">Результат</h2>
+        <span id="result-status" class="status" hidden></span>
+      </div>
+      <div id="result" class="result" aria-live="polite"><p class="muted">Выбери задачу в списке, чтобы открыть результат.</p></div>
+    </section>
+
+    <footer><span>AntiG × Devin</span><span>Репозиторий и лимит ACU задаются при запуске Devin.</span></footer>
+  </main>
+</body>
+</html>

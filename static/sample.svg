@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" role="img" aria-label="Демонстрационное изображение моста">
+  <path fill="#ebf4ff" d="M0 0h900v480H0z"/>
+  <circle cx="705" cy="130" r="57" fill="#b6d6ff"/>
+  <path fill="#d3e6ff" d="M0 342 170 183 302 282 480 160 687 330 900 246v234H0z"/>
+  <path fill="#97c3ff" d="M0 375 144 300 313 360 592 310 700 351 900 318v162H0z"/>
+  <path d="M98 327h705M220 330V192m460 138V192m-460 5c117 120 345 120 460 0M323 266v61m90-34v34m77-34v34m90-61v61" stroke="#154377" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <text x="32" y="56" fill="#154377" font-size="25" font-family="system-ui, sans-serif">Демонстрация</text>
+</svg>
