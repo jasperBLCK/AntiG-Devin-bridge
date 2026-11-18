@@ -5,6 +5,7 @@
 - `providers.py`: AntiG text/media and Devin v3 status, messages and structured reports.
 - `repository.py`: GitHub tree, pinned source files and verified PR metadata.
 - `github_connect.py`: GitHub App authorization, per-browser connection and installed repository access.
+- `configure_github.py`: loopback installer that registers a personal GitHub App via GitHub's manifest flow and launches Bridge.
 - `workspace.py`: immutable GitHub snapshots and signed file lookups; workspace routes in `app.py` create snapshots and validate optional branch publication.
 - `skills_market.py`: public skill metadata, browser libraries, reviews and agent instruction packs.
 - `static/`: task form, history and session editor.
