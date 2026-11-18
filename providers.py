@@ -4,12 +4,11 @@ import json
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 GROK_MODEL = "grok-4.7"
-IMAGE_MODELS = frozenset({"grok-imagine-image", "grok-imagine-image-2.0"})
-VIDEO_MODELS = frozenset({"grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-lite"})
+REPORT_FIELDS = ("summary", "checks", "remaining")
 
 
 class ProviderError(Exception):
@@ -43,7 +42,8 @@ def collect_chat_stream(raw: bytes) -> dict[str, Any]:
 
 
 def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
-                 stream_model: str = "", headers: dict[str, str] | None = None) -> dict[str, Any]:
+                 stream_model: str = "", headers: dict[str, str] | None = None,
+                 list_items: bool = False) -> dict[str, Any]:
     request_headers = {"Accept": "application/json", **(headers or {})}
     if key:
         request_headers["Authorization"] = f"Bearer {key}"
@@ -74,6 +74,8 @@ def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
         raise ProviderError(messages.get(exc.code, f"Сервис ответил ошибкой HTTP {exc.code}.")) from None
     except (URLError, OSError, ValueError):
         raise ProviderError("Не удалось прочитать ответ сервиса. Перед повтором проверь, не запустилась ли задача.") from None
+    if list_items and isinstance(data, list):
+        return {"items": data}
     if not isinstance(data, dict):
         raise ProviderError("Неожиданный формат ответа сервиса.")
     return data
@@ -102,19 +104,12 @@ class AntiG:
     def __init__(self, key: str) -> None:
         self.key = key
 
-    def plan(self, prompt: str) -> dict[str, Any]:
+    def text(self, prompt: str, system: str) -> str:
         data = request_json(f"{self.base}/chat/completions", self.key, {
             "model": GROK_MODEL,
             "stream": True,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты помогаешь с обычной разработкой ПО. Оцени задачу и предложи конкретный "
-                        "план для инженера: изменения, критерии готовности, проверки и риски. "
-                        "Не выдумывай содержимое репозитория. Отвечай на языке пользователя."
-                    ),
-                },
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
         }, stream_model=GROK_MODEL)
@@ -124,7 +119,7 @@ class AntiG:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("Grok не вернул текст.")
-        return {"status": "done", "result": content[:60_000]}
+        return content[:60_000]
 
     def image(self, prompt: str, model: str) -> dict[str, Any]:
         data = request_json(f"{self.base}/images/generations", self.key, {
@@ -165,10 +160,17 @@ class Devin:
         self.key = key
         self.base = f"https://api.devin.ai/v3/organizations/{identifier(org)}/sessions"
 
-    def start(self, prompt: str, repo: str | None, max_acu: int) -> dict[str, Any]:
-        payload: dict[str, Any] = {"prompt": prompt, "max_acu_limit": max_acu, "tags": ["antig-bridge"]}
-        if repo:
-            payload["repos"] = [repo]
+    def start(self, prompt: str, repo: str, max_acu: int) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "prompt": prompt, "repos": [repo], "max_acu_limit": max_acu, "tags": ["antig-bridge"],
+            "structured_output_required": True,
+            "structured_output_schema": {
+                "type": "object",
+                "properties": {field: {"type": "string", "maxLength": 2000} for field in REPORT_FIELDS},
+                "required": list(REPORT_FIELDS),
+                "additionalProperties": False,
+            },
+        }
         data = request_json(self.base, self.key, payload)
         remote_id = identifier(data.get("session_id"))
         return self._status(data, remote_id)
@@ -176,6 +178,27 @@ class Devin:
     def status(self, remote_id: str) -> dict[str, Any]:
         data = request_json(f"{self.base}/{identifier(remote_id)}", self.key)
         return self._status(data, remote_id)
+
+    def messages(self, remote_id: str, after: str | None = None) -> tuple[list[dict[str, Any]], str | None, bool]:
+        params = {"first": "100"}
+        if after:
+            params["after"] = after
+        data = request_json(f"{self.base}/{identifier(remote_id)}/messages?{urlencode(params)}", self.key)
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise ProviderError("Devin не вернул ленту сообщений.")
+        messages = []
+        for item in items[:100]:
+            if not isinstance(item, dict) or item.get("source") != "devin":
+                continue
+            text, event_id, at = item.get("message"), item.get("event_id"), item.get("created_at")
+            if isinstance(text, str) and isinstance(event_id, str) and type(at) is int:
+                messages.append({"id": event_id[:200], "text": text[:4000], "at": at})
+        cursor = data.get("end_cursor")
+        # A last page may return a null cursor; re-fetch that page to spot new messages.
+        return messages, cursor if isinstance(cursor, str) and len(cursor) <= 1024 else after, (
+            data.get("has_next_page") is True and isinstance(cursor, str) and cursor != after
+        )
 
     @staticmethod
     def _status(data: dict[str, Any], remote_id: str) -> dict[str, Any]:
@@ -189,8 +212,16 @@ class Devin:
         prs = data.get("pull_requests")
         pr_url = next((url for pr in prs if isinstance(pr, dict) and
                        (url := https_url(pr.get("pr_url")))), "") if isinstance(prs, list) else ""
+        detail = data.get("status_detail")
+        output = data.get("structured_output")
+        report: dict[str, str] = {}
+        if isinstance(output, dict):
+            report = {field: value.strip()[:2000] for field in REPORT_FIELDS
+                      if isinstance(value := output.get(field), str)}
         return {
-            "status": mapping[raw_status],
+            "status": "ended" if detail == "finished" and raw_status != "error" else mapping[raw_status],
+            "detail": detail[:80] if isinstance(detail, str) else "",
+            "report": report,
             "remote_id": remote_id,
             "session_url": f"https://app.devin.ai/sessions/{remote_id.removeprefix('devin-')}",
             "pr_url": pr_url,

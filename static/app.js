@@ -2,15 +2,25 @@
 
 const $ = (id) => document.getElementById(id);
 const form = $("job-form");
-const modes = {
-  grok: { title: "План Grok", button: "Получить план", label: "Что нужно разработать?", placeholder: "Например: продумай импорт CSV с проверкой ошибок" },
-  devin: { title: "Devin", button: "Запустить Devin", label: "Что должен сделать Devin?", placeholder: "Опиши результат и критерии готовности" },
-  image: { title: "Картинка", button: "Создать картинку", label: "Что должно быть на картинке?", placeholder: "Сюжет, стиль, освещение и композиция" },
-  video: { title: "Видео", button: "Создать видео", label: "Что происходит в кадре?", placeholder: "Сцена, действие, движение камеры и стиль" },
+const routes = {
+  auto: "Grok распределяет", answer: "Ответ Grok", clarify: "Уточнение Grok",
+  inspect: "Разбор Devin", implement: "Реализация Devin", grok: "План Grok", devin: "Devin",
+  image: "Изображение AntiG", video: "Видео AntiG",
 };
-const labels = { sending: "Отправляется", running: "В работе", paused: "На паузе", done: "Готово", ended: "Завершено", failed: "Ошибка" };
-const defaults = { image: "grok-imagine-image-2.0", video: "grok-imagine-video-1.5" };
-const state = { config: null, jobs: [], selected: null, source: null, busy: false, refreshing: false };
+const labels = {
+  sending: "Запуск", awaiting: "Нужно подтверждение", running: "В работе",
+  paused: "На паузе", reviewing: "Проверка отчёта", done: "Готово", ended: "Завершено", failed: "Ошибка",
+};
+const devinDetails = {
+  waiting_for_user: "Ждёт твоего ответа в сессии",
+  waiting_for_approval: "Ждёт разрешения в сессии",
+  working: "Работает в репозитории",
+  usage_limit_exceeded: "Достигнут лимит ACU",
+  out_of_credits: "Закончились кредиты",
+  out_of_quota: "Квота исчерпана",
+  inactivity: "Приостановлен из-за бездействия",
+};
+const state = { config: null, jobs: [], selected: null, detail: null, busy: false, loading: 0 };
 const project = { tree: null, selected: new Set(), context: null, version: 0 };
 
 async function api(path, payload) {
@@ -45,38 +55,14 @@ function message(id, value) {
   field.textContent = value || "";
 }
 
-function setMode() {
-  const mode = form.elements.mode.value;
-  const metadata = modes[mode];
-  const usesModel = mode === "image" || mode === "video";
-  $("project-fields").hidden = usesModel;
-  $("repo").disabled = $("git-ref").disabled = usesModel;
-  $("repo-browser").hidden = mode !== "grok";
-  $("devin-fields").hidden = mode !== "devin";
-  $("max-acu").disabled = mode !== "devin";
-  $("model-field").hidden = !usesModel;
-  $("model").disabled = !usesModel;
-  if (usesModel) {
-    const select = $("model");
-    const previous = select.value;
-    const choices = state.config?.models[mode] || [];
-    select.replaceChildren(...choices.map((name) => {
-      const option = element("option", name);
-      option.value = name;
-      return option;
-    }));
-    select.value = choices.includes(previous) ? previous : defaults[mode];
-  }
-  if (mode !== "devin") state.source = null;
-  $("handoff").hidden = !state.source;
-  $("prompt-label").textContent = metadata.label;
-  $("prompt").placeholder = metadata.placeholder;
-  const service = mode === "devin" ? "devin" : "antig";
-  const enabled = state.config?.[service];
-  $("submit").textContent = state.busy ? "Отправка…" : metadata.button;
-  $("submit").disabled = state.busy || !enabled;
-  $("form-hint").textContent = !state.config ? "Загрузка…" : !enabled ? "Нет ключа API" :
-    mode === "grok" ? "grok-4.7" : mode === "devin" ? "API v3" : "AntiG Imagine";
+function updateForm() {
+  const hasRepo = Boolean($("repo").value.trim());
+  $("devin-fields").hidden = !hasRepo;
+  $("devin-fields").disabled = !hasRepo;
+  $("submit").textContent = state.busy ? "Отправка…" : "Запустить задачу";
+  $("submit").disabled = state.busy || !state.config?.antig;
+  $("form-hint").textContent = !state.config ? "Подключение…" : !state.config.antig ? "Нет ключа AntiG" :
+    hasRepo && !state.config.devin ? "Ключ Devin не настроен" : "Исполнитель выбирается автоматически";
 }
 
 function resetContext() {
@@ -95,7 +81,7 @@ function resetProject() {
   $("file-filter").value = "";
   $("file-list").replaceChildren();
   message("repo-error", "");
-  $("repo-hint").textContent = "Необязательно. Выбранный код можно проверить перед отправкой.";
+  $("repo-hint").textContent = "Необязательно. Grok увидит только файлы, которые разрешишь отправить.";
 }
 
 function displayFiles() {
@@ -131,7 +117,10 @@ function displayFileCount() {
   $("preview-files").disabled = !project.selected.size;
 }
 
-$("repo").addEventListener("input", resetProject);
+$("repo").addEventListener("input", () => {
+  resetProject();
+  updateForm();
+});
 $("git-ref").addEventListener("input", resetProject);
 $("file-filter").addEventListener("input", displayFiles);
 $("load-tree").addEventListener("click", async () => {
@@ -204,7 +193,7 @@ function showHistory() {
     button.setAttribute("aria-current", String(state.selected === job.id));
     button.querySelector(".job-title").textContent = job.prompt;
     const at = new Date(job.created_at).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
-    button.querySelector(".job-meta").textContent = modes[job.mode].title + " · " + at;
+    button.querySelector(".job-meta").textContent = routeTitle(job) + " · " + at;
     const status = button.querySelector(".status");
     status.textContent = statusText(job);
     status.dataset.status = job.status;
@@ -222,32 +211,150 @@ function link(title, url) {
   return node;
 }
 
+function taskRoute(job) {
+  return job.route || job.mode;
+}
+
+function routeTitle(job) {
+  return routes[taskRoute(job)] || "Задача";
+}
+
+function currentStage(job) {
+  const route = taskRoute(job);
+  if (job.status === "reviewing") return ["Grok", "Разбирает отчёт Devin"];
+  if (["done", "ended", "failed"].includes(job.status)) {
+    return [job.reviewed_at ? "Grok" : routeTitle(job), labels[job.status]];
+  }
+  if (route === "auto" || route === "grok") return ["Grok", "Распределяет задачу"];
+  if (["image", "video"].includes(route)) {
+    return ["AntiG Imagine", job.status === "awaiting" ? "Ждёт подтверждения генерации" : "Генерирует медиа"];
+  }
+  return ["Devin", devinDetails[job.activity?.detail] ||
+    (job.status === "sending" ? "Запускает сессию" : job.status === "paused" ? "Сессия на паузе" : "Сессия запущена")];
+}
+
+function logEntry(list, actor, text, timestamp, isMessage = false) {
+  const row = element("li");
+  const date = new Date(timestamp);
+  const at = timestamp && !Number.isNaN(date.valueOf()) ?
+    " · " + date.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "";
+  row.append(element("div", actor + at, "mono muted"));
+  row.append(element(isMessage ? "pre" : "p", text));
+  list.append(row);
+}
+
+function showActivity(root, job) {
+  const activity = job.activity || {};
+  const messages = activity.messages || [];
+  const isDevin = ["implement", "inspect", "devin"].includes(taskRoute(job));
+  const latest = messages.at(-1);
+  if (latest) {
+    root.append(element("h3", "Последнее сообщение Devin"), element("pre", latest.text));
+  }
+  if (activity.pr) {
+    const pr = activity.pr;
+    root.append(element("h3", "Файлы в GitHub PR"));
+    root.append(element("p", [pr.head, pr.base].filter(Boolean).join(" → "), "mono"));
+    const paths = element("ul", "", "changed-files mono");
+    for (const path of pr.files) paths.append(element("li", path));
+    root.append(paths);
+    if (pr.total > pr.files.length) root.append(element("p", "Показано " + pr.files.length + " из " + pr.total + " файлов.", "muted"));
+  }
+  if (isDevin && (job.session_url || state.config?.demo)) {
+    root.append(element("p", "Команды и незакоммиченные файлы видны в самой сессии Devin.", "muted"));
+  }
+  for (const warning of [...(activity.warnings || []), activity.pr_error].filter(Boolean)) {
+    root.append(element("p", warning, "muted"));
+  }
+  if (activity.report?.summary) {
+    root.append(element("h3", "Отчёт Devin"));
+    const names = { summary: "Итог", checks: "Проверки", remaining: "Осталось" };
+    root.append(element("pre", Object.entries(names).filter(([key]) => activity.report[key])
+      .map(([key, title]) => title + ": " + activity.report[key]).join("\n\n")));
+  }
+  if (job.mode !== "auto") return;
+  const journal = element("details", "", "job-journal");
+  journal.id = "job-journal";
+  journal.append(element("summary", "Журнал работы"));
+  const list = element("ol", "", "activity-list");
+  if (job.reviewed_at) logEntry(list, "Grok", "Разобрал отчёт Devin.", job.reviewed_at);
+  if (job.finished_at) logEntry(list, isDevin ? "Devin" : routeTitle(job), "Работа завершилась.", job.finished_at);
+  for (const entry of [...messages].reverse()) {
+    logEntry(list, "Devin" + (state.config?.demo ? " (демо)" : ""), entry.text,
+      entry.at < 1e12 ? entry.at * 1000 : entry.at, true);
+  }
+  if (job.reason) logEntry(list, "Grok", routeTitle(job) + ": " + job.reason, job.routed_at);
+  logEntry(list, "Панель", "Задача принята.", job.created_at);
+  journal.append(list);
+  root.append(journal);
+}
+
+function confirmMedia(root, job) {
+  const button = element("button", "Подтвердить генерацию", "primary");
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await api("/api/jobs/" + job.id + "/generate", {});
+      await load();
+    } catch (error) {
+      message("history-error", error.message);
+      button.disabled = false;
+    }
+  });
+  root.append(element("p", "Модель: " + job.model + ". В реальном режиме генерация расходует квоту.", "muted"), button);
+}
+
 let rendered = "";
+let renderedId = null;
 function showResult() {
-  const job = state.jobs.find((item) => item.id === state.selected);
+  const job = state.detail?.id === state.selected ? state.detail : state.jobs.find((item) => item.id === state.selected);
   const snapshot = JSON.stringify(job ?? null);
   if (rendered === snapshot) return;
   rendered = snapshot;
   const root = $("result");
+  const expanded = renderedId === job?.id ? new Set([...root.querySelectorAll("details[open]")].map((node) => node.id)) : new Set();
+  renderedId = job?.id;
   const status = $("result-status");
   status.hidden = !job;
   if (!job) {
-    root.replaceChildren(element("p", "Выбери задачу в списке, чтобы открыть результат.", "muted"));
+    root.replaceChildren(element("p", "Выбери задачу в списке, чтобы увидеть ход работы.", "muted"));
     return;
   }
+  const route = taskRoute(job);
   status.textContent = statusText(job);
   status.dataset.status = job.status;
-  root.replaceChildren(element("h3", modes[job.mode].title + (job.model ? " · " + job.model : "")));
-  if (job.repo) {
-    root.append(element("p", [job.repo, job.ref, job.commit_sha?.slice(0, 8)].filter(Boolean).join(" · "), "mono muted"));
-  }
+  const [actor, stage] = currentStage(job);
+  const stageNode = element("div", "", "current-stage");
+  stageNode.setAttribute("aria-live", "polite");
+  stageNode.append(element("strong", actor), element("span", stage));
+  root.replaceChildren(stageNode);
+  if (job.repo) root.append(element("p", [job.repo, job.ref || "база по умолчанию", job.commit_sha?.slice(0, 8)]
+    .filter(Boolean).join(" · "), "mono muted"));
   root.append(element("p", job.prompt, "muted"));
+  if (job.reason) root.append(element("p", job.reason));
   if (job.error) root.append(element("p", job.error, "error"));
-  if (job.result) root.append(element("pre", job.result));
+  const actions = element("div", "", "result-actions");
+  if (job.session_url) actions.append(link("Открыть сессию Devin", job.session_url));
+  if (job.pr_url) actions.append(link("Открыть PR", job.pr_url));
+  if (job.media_url) actions.append(link("Открыть медиа", job.media_url));
+  if (actions.childElementCount) root.append(actions);
+  if (job.plan) {
+    const plan = element("details", "", "job-journal");
+    plan.id = "job-plan";
+    plan.append(element("summary", "Что Grok поручил Devin"), element("pre", job.plan));
+    root.append(plan);
+  }
+  if (job.status === "awaiting") confirmMedia(root, job);
+  showActivity(root, job);
+  if (job.result) {
+    if (job.reviewed_at) root.append(element("h3", "Разбор отчёта · Grok"));
+    root.append(element("pre", job.result));
+  }
   if (job.media_url) {
-    const media = document.createElement(job.mode === "video" ? "video" : "img");
+    const media = document.createElement(route === "video" ? "video" : "img");
     media.src = job.media_url;
-    if (job.mode === "video") {
+    if (route === "video") {
       media.controls = true;
       media.preload = "none";
     } else {
@@ -256,124 +363,69 @@ function showResult() {
     root.append(media);
     if (!state.config?.demo) root.append(element("p", "Ссылка может истечь — сохрани медиа после генерации.", "muted"));
   }
-  const actions = element("div", "", "result-actions");
-  if (job.mode === "grok" && job.status === "done") {
-    const action = element("button", "Передать в Devin", "primary");
-    action.type = "button";
-    action.addEventListener("click", () => {
-      state.source = job.id;
-      resetProject();
-      if (job.repo) {
-        $("repo").value = job.repo;
-        $("git-ref").value = job.ref || "";
-      }
-      form.querySelector('[value="devin"]').checked = true;
-      $("prompt").value = job.prompt;
-      setMode();
-      $("prompt").focus();
-    });
-    actions.append(action);
-  }
-  if (job.session_url) actions.append(link("Открыть сессию", job.session_url));
-  if (job.pr_url) actions.append(link("Открыть PR", job.pr_url));
-  if (job.media_url) actions.append(link("Открыть медиа", job.media_url));
-  if (actions.childElementCount) root.append(actions);
+  for (const node of root.querySelectorAll("details")) node.open = expanded.has(node.id);
 }
 
-async function load({ refresh = false, paused = false } = {}) {
-  if (state.refreshing) return;
-  state.refreshing = true;
+async function load() {
+  const version = ++state.loading;
+  const selected = state.selected;
   try {
-    let jobs = await api("/api/jobs");
-    if (refresh) {
-      const selected = state.selected;
-      const pending = jobs.find((job) => job.id === selected &&
-        job.remote_id && (job.status === "running" || (paused && job.status === "paused")));
-      if (pending) {
-        try {
-          const current = await api("/api/jobs/" + pending.id + "/refresh", {});
-          jobs = jobs.map((job) => job.id === current.id ? current : job);
-          message("history-error", "");
-        } catch (error) {
-          message("history-error", error.message);
-        }
-      }
-    }
+    const [jobs, detail] = await Promise.all([
+      api("/api/jobs"),
+      selected ? api("/api/jobs/" + selected) : null,
+    ]);
+    if (version !== state.loading) return;
     state.jobs = jobs;
+    state.detail = detail;
+    message("history-error", "");
     showHistory();
     showResult();
   } catch (error) {
-    message("history-error", error.message);
-  } finally {
-    state.refreshing = false;
+    if (version === state.loading) message("history-error", error.message);
   }
 }
 
 async function selectJob(id) {
   state.selected = id;
-  message("history-error", "");
   showHistory();
   showResult();
-  await load({ refresh: true, paused: true });
+  await load();
 }
 
-form.querySelectorAll("[name=mode]").forEach((radio) => radio.addEventListener("change", () => {
-  message("form-error", "");
-  setMode();
-}));
-$("clear-source").addEventListener("click", () => {
-  state.source = null;
-  setMode();
-  $("prompt").focus();
-});
-$("reload").addEventListener("click", () => {
-  message("history-error", "");
-  void load({ refresh: true, paused: true });
-});
+$("reload").addEventListener("click", () => void load());
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.busy || $("submit").disabled) return;
-  const mode = form.elements.mode.value;
-  const payload = { mode, prompt: $("prompt").value.trim() };
+  const payload = { prompt: $("prompt").value.trim() };
   if (!payload.prompt) {
     message("form-error", "Введи задачу.");
     return;
   }
-  if (mode === "grok" || mode === "devin") {
-    const repo = $("repo").value.trim();
-    const ref = $("git-ref").value.trim();
-    if (repo) payload.repo = repo;
-    if (ref) payload.ref = ref;
-    if (mode === "grok" && repo) {
-      if (!project.context || !$("share-context").checked) {
-        message("form-error", "Выбери файлы, проверь код и подтверди отправку в AntiG.");
-        return;
-      }
-      payload.context = project.context;
-    }
-  }
-  if (mode === "devin") {
+  const repo = $("repo").value.trim();
+  const ref = $("git-ref").value.trim();
+  if (repo) {
+    payload.repo = repo;
     payload.max_acu = Number($("max-acu").value);
-    if (state.source) payload.source_id = state.source;
-  } else if (mode !== "grok") {
-    payload.model = $("model").value;
+    payload.draft_pr = $("draft-pr").checked;
+    payload.review = $("review").checked;
+  }
+  if (ref) payload.ref = ref;
+  if (project.context && $("share-context").checked) {
+    payload.context = { commit: project.context.commit, paths: project.context.files.map((file) => file.path) };
   }
   state.busy = true;
   message("form-error", "");
-  setMode();
+  updateForm();
   try {
     const job = await api("/api/jobs", payload);
     state.jobs.unshift(job);
-    state.selected = job.id;
-    if (mode === "devin") state.source = null;
-    showHistory();
-    showResult();
-    await load();
+    state.detail = job;
+    await selectJob(job.id);
   } catch (error) {
     message("form-error", error.message);
   } finally {
     state.busy = false;
-    setMode();
+    updateForm();
   }
 });
 
@@ -383,17 +435,17 @@ async function init() {
     const cfg = state.config;
     $("environment").textContent = cfg.demo ? "Демо · без внешних запросов" :
       "AntiG: " + (cfg.antig ? "ключ задан" : "нет ключа") + " · Devin: " + (cfg.devin ? "ключ задан" : "нет ключа");
-    setMode();
+    updateForm();
     await load();
     if (state.jobs.length) await selectJob(state.jobs[0].id);
     window.setInterval(() => {
-      if (!document.hidden) void load({ refresh: true });
-    }, 4500);
+      if (!document.hidden) void load();
+    }, 4000);
   } catch (error) {
     $("environment").textContent = "Нет связи с панелью";
     message("form-error", error.message);
   }
 }
 
-setMode();
+updateForm();
 void init();

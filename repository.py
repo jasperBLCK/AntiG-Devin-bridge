@@ -86,6 +86,32 @@ class GitHub:
         except (UnicodeError, binascii.Error, ValueError):
             raise ProviderError(f"Файл должен быть текстом в UTF-8: {path}") from None
 
+    def pull_request(self, repo: str, url: str) -> dict[str, Any]:
+        match = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9][0-9]{0,11})/?", url, re.ASCII)
+        if not match or match[1].lower() != repo.lower():
+            raise ProviderError("Ссылка на PR не относится к выбранному репозиторию.")
+        endpoint = f"/pulls/{match[2]}"
+        pr = self._read(repo, endpoint)
+        head, base = pr.get("head"), pr.get("base")
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            raise ProviderError("GitHub не вернул ветки PR.")
+        data = request_json(
+            f"https://api.github.com/repos/{repo}{endpoint}/files?per_page=50",
+            self.key, headers=GITHUB_HEADERS, list_items=True,
+        )
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise ProviderError("GitHub не вернул файлы PR.")
+        paths = [item["filename"] for item in items[:50] if isinstance(item, dict)
+                 and isinstance(item.get("filename"), str) and len(item["filename"]) <= 320]
+        total = pr.get("changed_files")
+        return {
+            "head": str(head.get("label") or head.get("ref") or "")[:250],
+            "base": str(base.get("ref") or "")[:200],
+            "files": paths,
+            "total": total if type(total) is int else None,
+        }
+
 
 DEMO_FILES = {
     "README.md": "# Demo project\nA small CSV importer. The first row contains the column names.\n",

@@ -20,11 +20,11 @@
     <section class="intro" aria-labelledby="title">
       <div>
         <div class="eyebrow">РАБОЧАЯ СРЕДА</div>
-        <h1 id="title">От идеи к PR</h1>
-        <p>Grok помогает разобрать задачу, Devin реализует её в репозитории.</p>
+        <h1 id="title">Разработка в паре</h1>
+        <p>Опиши задачу. Grok и Devin разделят работу, а панель покажет, что происходит.</p>
       </div>
       <ol class="pipeline" aria-label="Сценарий разработки">
-        <li><span>01</span> План</li><li><span>02</span> Передача</li><li><span>03</span> Реализация</li>
+        <li><span>01</span> Распределение</li><li><span>02</span> Работа</li><li><span>03</span> Проверка</li>
       </ol>
     </section>
 
@@ -34,19 +34,8 @@
       <section class="panel compose" aria-labelledby="compose-title">
         <div class="panel-header"><h2 id="compose-title">Новая задача</h2></div>
         <form id="job-form">
-          <fieldset class="mode-picker">
-            <legend>Режим</legend>
-            <label><input type="radio" name="mode" value="grok" checked><span>План Grok</span></label>
-            <label><input type="radio" name="mode" value="devin"><span>Devin</span></label>
-            <label><input type="radio" name="mode" value="image"><span>Картинка</span></label>
-            <label><input type="radio" name="mode" value="video"><span>Видео</span></label>
-          </fieldset>
-          <div id="handoff" class="handoff" hidden>
-            <span>Готовый план Grok будет добавлен к запросу.</span>
-            <button id="clear-source" type="button" class="text-button">Убрать</button>
-          </div>
-          <label for="prompt" id="prompt-label">Что нужно разработать?</label>
-          <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: продумай импорт CSV с проверкой ошибок"></textarea>
+          <label for="prompt">Что нужно сделать?</label>
+          <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: исправь импорт пустого CSV и добавь регрессионный тест"></textarea>
           <div id="project-fields" class="project-fields">
             <div class="project-inputs">
               <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
@@ -54,7 +43,7 @@
             </div>
             <div id="repo-browser" class="repo-browser">
               <button id="load-tree" type="button" class="quiet">Выбрать файлы</button>
-              <span id="repo-hint" class="muted">Необязательно. Выбранный код можно проверить перед отправкой.</span>
+              <span id="repo-hint" class="muted">Необязательно. Grok увидит только файлы, которые разрешишь отправить.</span>
               <div id="repo-tree" hidden>
                 <label for="file-filter">Найти файл</label>
                 <input id="file-filter" type="search" placeholder="Например: README или src/">
@@ -69,13 +58,15 @@
               </div>
             </div>
           </div>
-          <div id="devin-fields" class="devin-fields" hidden>
-            <label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required>
-          </div>
-          <div id="model-field" hidden><label for="model">Модель</label><select name="model" id="model"></select></div>
+          <fieldset id="devin-fields" class="devin-fields" hidden disabled>
+            <legend>Если задачу возьмёт Devin</legend>
+            <div class="budget"><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
+            <label class="confirmation"><input id="draft-pr" type="checkbox"> Разрешить черновик PR (без merge)</label>
+            <label class="confirmation"><input id="review" type="checkbox" checked> Дать Grok разобрать итоговый отчёт Devin</label>
+          </fieldset>
           <div class="form-actions">
-            <button type="submit" id="submit" class="primary" disabled>Получить план</button>
-            <span id="form-hint" class="muted mono">grok-4.7</span>
+            <button type="submit" id="submit" class="primary" disabled>Запустить задачу</button>
+            <span id="form-hint" class="muted">Распределение автоматическое</span>
           </div>
           <p id="form-error" class="error" role="alert" hidden></p>
         </form>
@@ -93,13 +84,13 @@
 
     <section class="panel result-panel" id="result-panel" aria-labelledby="result-title">
       <div class="panel-header">
-        <h2 id="result-title">Результат</h2>
+        <h2 id="result-title">Ход задачи</h2>
         <span id="result-status" class="status" hidden></span>
       </div>
-      <div id="result" class="result" aria-live="polite"><p class="muted">Выбери задачу в списке, чтобы открыть результат.</p></div>
+      <div id="result" class="result"><p class="muted">Выбери задачу в списке, чтобы увидеть ход работы.</p></div>
     </section>
 
-    <footer><span>AntiG × Devin</span><span>Репозиторий и лимит ACU задаются при запуске Devin.</span></footer>
+    <footer><span>AntiG × Devin</span><span>Автоматическое распределение и журнал работы</span></footer>
   </main>
 </body>
 </html>
