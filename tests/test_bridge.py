@@ -436,6 +436,88 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(reset.json()["keys"]["xai"], "missing")
             self.assertEqual(client.post("/api/jobs", json={"prompt": "Hi"}, headers=WRITE, auth=auth).status_code, 503)
 
+    def test_devin_settings_are_protected_and_never_echo_credentials(self):
+        org, key = "org-test", "cog_" + "d" * 24
+        path = "/api/settings/devin"
+        payload = {"org": org, "key": key}
+        with self.client() as client:
+            self.assertEqual(client.post(path, json=payload, headers=WRITE).status_code, 403)
+
+        auth = ("bridge", "open-sesame")
+        settings = Settings(self.path, admin_key=auth[1])
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("providers.request_json") as api:
+            self.assertEqual(client.post(path, json=payload, headers=WRITE).status_code, 401)
+            self.assertEqual(client.post(path, json=payload, auth=auth).status_code, 403)
+            self.assertFalse(client.get("/api/config", auth=auth).json()["devin"])
+            for wrong in ({**payload, "org": key}, {**payload, "key": {"input": key}}, {**payload, "reset": True}):
+                rejected = client.post(path, json=wrong, headers=WRITE, auth=auth)
+                self.assertEqual(rejected.status_code, 422)
+                self.assertNotIn(key, rejected.text)
+            saved = client.post(path, json=payload, headers=WRITE, auth=auth)
+            loaded = client.get("/api/settings", auth=auth)
+            self.assertEqual(saved.json()["devin"], "runtime")
+            self.assertEqual(loaded.json()["devin"], "runtime")
+            self.assertNotIn(key, saved.text + loaded.text)
+            self.assertTrue(client.get("/api/config", auth=auth).json()["devin"])
+            api.assert_not_called()
+        with TestClient(create_app(settings, poll_seconds=0)) as restarted:
+            self.assertEqual(restarted.get("/api/settings", auth=auth).json()["devin"], "missing")
+
+    def test_devin_runtime_credentials_launch_and_poll_only_the_matching_org(self):
+        org, key = "org-original", "cog_" + "r" * 24
+        auth = ("bridge", "open-sesame")
+        settings = Settings(self.path, antig_key="mock-antig", admin_key=auth[1],
+                            devin_org=org, devin_key="env-token")
+        base = f"https://api.devin.ai/v3/organizations/{org}/sessions"
+
+        def remote(url, *_args, **_kwargs):
+            if url.endswith("/chat/completions"):
+                return route("inspect")
+            if url == base:
+                return {"session_id": "devin-runtime", "status": "new"}
+            if "/messages?" in url:
+                return {"items": [message("evt", f"Secret: {key}", 1)]}
+            return {"status": "running"}
+
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("providers.request_json", side_effect=remote) as api:
+            client.auth = auth
+            path = "/api/settings/devin"
+            self.assertEqual(client.get("/api/settings").json()["devin"], "environment")
+            self.assertEqual(client.post(path, json={"org": org, "key": key}, headers=WRITE).status_code, 200)
+            run = self.submit(client, repo="test/repo", prompt=f"Check CSV parsing {key}")
+            self.assertEqual(self.get(client, run)["status"], "running")
+            self.assertEqual(api.call_args.args[:2], (base, key))
+            self.assertNotIn(key, api.call_args.args[2]["prompt"])
+            self.assertNotIn(key, str(self.refresh(client, run)))
+            self.assertEqual(api.call_args_list[-2].args[:2], (base + "/devin-runtime", key))
+
+            saved = client.post(path, json={"org": "org-other", "key": "cog_" + "o" * 24}, headers=WRITE)
+            self.assertEqual(saved.status_code, 200)
+            api.reset_mock()
+            self.assertIn("исходную организацию", self.refresh(client, run)["error"])
+            api.assert_not_called()
+            self.assertEqual(client.post(path, json={"reset": True}, headers=WRITE).json()["devin"], "environment")
+            polled = self.refresh(client, run)
+            self.assertFalse(polled["error"])
+            self.assertNotIn(key, str(polled))
+            self.assertEqual(api.call_args_list[0].args[:2], (base + "/devin-runtime", "env-token"))
+
+    def test_changing_devin_org_blocks_paid_project_media_until_restored(self):
+        decision = chat(json.dumps({"route": "implement", "reason": "Needs assets", "content": "Build the hero.",
+                                    "assets": [{"kind": "image", "prompt": "An abstract line drawing"}]}))
+        auth = ("bridge", "open-sesame")
+        settings = Settings(self.path, antig_key="mock-antig", admin_key=auth[1],
+                            devin_org="org-original", devin_key="env-token")
+        with TestClient(create_app(settings, poll_seconds=0)) as client, patch("providers.request_json", return_value=decision) as api:
+            client.auth = auth
+            run = self.submit(client, repo="test/repo", prompt="Build a homepage and generate an illustration")
+            self.assertEqual(self.get(client, run)["status"], "awaiting")
+            saved = client.post("/api/settings/devin", json={"org": "org-other", "key": "cog_" + "o" * 24}, headers=WRITE)
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(self.action(client, run, "generate").status_code, 409)
+            self.assertEqual(self.get(client, run)["status"], "awaiting")
+            api.assert_called_once()
+
     def test_background_progress_without_browser_refresh(self):
         polled = Event()
 

@@ -192,6 +192,13 @@ class KeySettings(BaseModel):
     reset: bool = False
 
 
+class DevinSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    org: str = ""
+    key: SecretStr | None = None
+    reset: bool = False
+
+
 def iso_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -234,6 +241,7 @@ class Store:
                 "grok_provider": "TEXT NOT NULL DEFAULT 'antig'",
                 "hidden": "INTEGER NOT NULL DEFAULT 0",
                 "pipeline": "TEXT NOT NULL DEFAULT '{}'",
+                "devin_org": "TEXT",
             }
             for column, schema in additions.items():
                 if column not in columns:
@@ -345,7 +353,7 @@ class Store:
         keys = {
             "status", "result", "media_url", "remote_id", "session_url", "pr_url", "progress", "error",
             "model", "route", "reason", "plan", "activity", "routed_at", "finished_at", "reviewed_at", "last_polled",
-            "devin_acu", "pipeline",
+            "devin_acu", "pipeline", "devin_org",
         }
         columns = [key for key in update if key in keys]
         assignments = ", ".join(f"{column} = ?" for column in columns)
@@ -376,12 +384,19 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     skills = Skills(store.connect, public=not settings.demo or settings.public_skills)
     env_keys: dict[GrokProvider, str] = {"antig": settings.antig_key, "xai": settings.xai_key}
     runtime_keys: dict[GrokProvider, str] = {}
+    env_devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
+    runtime_devin: Devin | None = None
     selected_provider = settings.grok_provider
     keys_lock = Lock()
 
     def grok_client(provider: GrokProvider) -> AntiG:
         with keys_lock:
             return AntiG(runtime_keys.get(provider, env_keys[provider]), provider)
+
+    def devin_client(org: str | None = None) -> Devin | None:
+        with keys_lock:
+            client = runtime_devin or env_devin
+            return client if client and (org is None or client.org == org) else None
 
     def require_grok(provider: GrokProvider) -> AntiG:
         client = grok_client(provider)
@@ -406,7 +421,6 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     connect = GitHubConnect(settings.github_app, oauth_allowed, gated=gated, demo=settings.demo)
     admin_enabled = connect.enabled if gated else bool(settings.admin_key)
     workspace = Workspace(github, settings.demo)
-    devin = Devin(settings.devin_key, settings.devin_org) if settings.devin_key and settings.devin_org else None
 
     def github_for(request: Request, repo: str) -> GitHub:
         return connect.client(request, repo) if connect.enabled else github
@@ -417,12 +431,13 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def redact(text: str) -> str:
         with keys_lock:
             keys = (*env_keys.values(), *runtime_keys.values(), settings.admin_key,
-                    settings.devin_key, settings.github_read_token, settings.github_write_token,
+                    settings.devin_key, runtime_devin.key if runtime_devin else "",
+                    settings.github_read_token, settings.github_write_token,
                     settings.github_app.client_secret)
         for secret in keys:
             if secret:
                 text = text.replace(secret, "[скрыто]")
-        return re.sub(r"\b(?:ag_|xai-|gh[pousr]_|github_pat_)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
+        return re.sub(r"\b(?:ag_|xai-|cog_|gh[pousr]_|github_pat_)[a-zA-Z0-9_-]{16,}", "[скрыто]", text)
 
     def read_files(repo: str, commit: str, paths: list[str], client: GitHub) -> list[dict[str, str]]:
         if len(set(paths)) != len(paths) or not all(map(shareable_path, paths)):
@@ -437,7 +452,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         return files
 
     def start_devin(
-        job: dict[str, Any], draft_pr: bool, uploads: list[tuple[str, str]] | None = None,
+        job: dict[str, Any], draft_pr: bool, devin: Devin | None, uploads: list[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         prompt = handoff(job["prompt"], job["plan"], job["repo"], job["ref"], job["commit_sha"],
                          inspect=job["route"] == "inspect", draft_pr=draft_pr, skills=job["skills"])
@@ -448,12 +463,12 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
         if settings.demo:
             return {"status": "running", "remote_id": "demo"}
         if not devin:
-            raise ProviderError("Задача требует Devin. Добавь ключ Devin и запусти её снова.")
+            raise ProviderError("Настрой ключ и ID организации Devin в настройках «Моста».")
         result = devin.start(prompt, job["repo"], job["max_acu"], [url for _, url in uploads] if uploads else None)
         # The create response has no final report; even an ended session needs its first poll.
         if result["status"] == "ended":
             result["status"] = "running"
-        return result
+        return {**result, "devin_org": devin.org}
 
     def dispatch(job_id: str, task: Submission, recipes: list[dict[str, str]], grok: AntiG, client: GitHub) -> None:
         try:
@@ -474,15 +489,17 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                     update.update(status="done", route="clarify", reason="Для работы Devin нужен репозиторий.",
                                   result="Укажи репозиторий GitHub и повтори задачу.")
                 elif decision.assets:
+                    devin = devin_client()
                     if not settings.demo and not devin:
-                        raise ProviderError("Задача требует Devin. Добавь ключ Devin и запусти её снова.")
-                    update.update(status="awaiting", plan=content, pipeline={"draft_pr": task.draft_pr, "assets": [
+                        raise ProviderError("Настрой ключ и ID организации Devin в настройках «Моста».")
+                    update.update(status="awaiting", plan=content, devin_org=devin.org if devin else None,
+                                  pipeline={"draft_pr": task.draft_pr, "assets": [
                         {"kind": kind, "prompt": redact(prompt), "status": "planned", "model": MEDIA_MODELS[kind]}
                         for kind, prompt in decision.assets
                     ]})
                 else:
                     store.apply(job_id, {**update, "plan": content}, "sending")
-                    update.update(start_devin(store.get(job_id), task.draft_pr))
+                    update.update(start_devin(store.get(job_id), task.draft_pr, devin_client()))
             elif decision.route in MEDIA_MODELS:
                 update.update(status="awaiting", model=MEDIA_MODELS[decision.route])
             else:
@@ -533,16 +550,17 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def finish_pipeline(job: dict[str, Any]) -> None:
         pipeline, job_id = job["pipeline"], job["id"]
         uploads = []
+        devin = devin_client(job["devin_org"] or settings.devin_org)
         if not settings.demo:
             if not devin:
-                raise ProviderError("Ключ Devin не настроен. Медиа сохранены в задаче.")
+                raise ProviderError("Подключи исходную организацию Devin в настройках. Медиа сохранены в задаче.")
             for asset in pipeline["assets"]:
                 kind, ext = asset["kind"], asset["ext"]
                 name = f"bridge-{kind}.{ext}"
                 mime = "video/mp4" if kind == "video" else f"image/{ext}"
                 url = devin.upload(name, asset_path(job_id, kind, ext).read_bytes(), mime)
                 uploads.append((name, url))
-        update = start_devin(job, pipeline["draft_pr"], uploads)
+        update = start_devin(job, pipeline["draft_pr"], devin, uploads)
         store.apply(job_id, {**update, "error": None}, "sending")
 
     def pipeline_error(job: dict[str, Any], exc: Exception) -> None:
@@ -559,6 +577,8 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                     if asset["kind"] == "image":
                         asset["media_url"] = "/static/sample.svg"
             else:
+                if not devin_client(job["devin_org"] or settings.devin_org):
+                    raise ProviderError("Перед генерацией подключи исходную организацию Devin в настройках.")
                 grok = require_grok(job["grok_provider"])
                 # Complete the image before starting a remote video job.
                 for asset in sorted(pipeline["assets"], key=lambda item: item["kind"]):
@@ -680,7 +700,10 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             try:
                 if settings.demo:
                     update = demo_update(job)
-                elif (route in DEVIN_ROUTES or route == "devin") and devin:
+                elif route in DEVIN_ROUTES or route == "devin":
+                    devin = devin_client(job["devin_org"] or settings.devin_org)
+                    if not devin:
+                        raise ProviderError("Подключи исходную организацию Devin в настройках.")
                     update = devin_update(job, devin)
                 elif route == "video":
                     update = require_grok(job["grok_provider"]).video_status(remote_id)
@@ -756,7 +779,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc: RequestValidationError) -> Response:
-        if request.url.path == "/api/settings":
+        if request.url.path in {"/api/settings", "/api/settings/devin"}:
             return JSONResponse({"detail": "Проверь поля настроек."}, status_code=422)
         if request.url.path.endswith("/workspace/publish"):
             return JSONResponse({"detail": "Проверь поля запроса и ограничения размера."}, status_code=422)
@@ -844,7 +867,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             "antig": bool(settings.antig_key or settings.demo),
             "grok": bool(grok.key or settings.demo),
             "grok_provider": selected_provider,
-            "devin": bool(devin or settings.demo),
+            "devin": bool(devin_client() or settings.demo),
             "github_private": bool((connect.enabled or settings.github_read_token) and not settings.demo),
             "can_manage": admin_enabled,
         }
@@ -856,6 +879,7 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
                 "provider": selected_provider,
                 "keys": {provider: "runtime" if provider in runtime_keys else "environment" if key else "missing"
                          for provider, key in env_keys.items()},
+                "devin": "runtime" if runtime_devin else "environment" if env_devin else "missing",
                 "can_manage": admin_enabled,
                 "demo": settings.demo,
             }
@@ -875,6 +899,22 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
             elif key:
                 runtime_keys[change.provider] = key
             selected_provider = change.provider
+        return key_status()
+
+    @app.post("/api/settings/devin", dependencies=[Depends(require_admin_enabled)])
+    def update_devin(change: DevinSettings) -> dict[str, Any]:
+        nonlocal runtime_devin
+        key = change.key.get_secret_value().strip() if change.key else ""
+        org = change.org.strip()
+        if change.reset and (key or org):
+            raise HTTPException(422, "Выбери сохранение или сброс, но не оба действия.")
+        if not change.reset:
+            if not re.fullmatch(r"cog_[A-Za-z0-9_-]{16,508}", key):
+                raise HTTPException(422, "Укажи действующий формат ключа Devin API: cog_…")
+            if not re.fullmatch(r"org-[A-Za-z0-9_-]{1,124}", org):
+                raise HTTPException(422, "ID организации Devin должен начинаться с org-.")
+        with keys_lock:
+            runtime_devin = None if change.reset else Devin(key, org)
         return key_status()
 
     @app.get("/api/jobs")
@@ -1052,6 +1092,9 @@ def create_app(settings: Settings, *, poll_seconds: float = 8) -> FastAPI:
     def approve_media(job_id: JobID, background: BackgroundTasks) -> dict[str, Any]:
         current = store.get(job_id)
         pipeline = current["route"] == "implement" and bool(current["pipeline"])
+        if (pipeline and current["status"] == "awaiting" and not settings.demo
+                and not devin_client(current["devin_org"] or settings.devin_org)):
+            raise HTTPException(409, "Перед генерацией подключи исходную организацию Devin в настройках.")
         if ((not pipeline and current["route"] not in MEDIA_MODELS)
                 or not store.apply(job_id, {"status": "sending"}, "awaiting")):
             raise HTTPException(409, "Генерация уже запущена или эта задача не требует подтверждения.")

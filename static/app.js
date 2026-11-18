@@ -588,7 +588,7 @@ async function init() {
     state.config = await api("/api/config");
     const cfg = state.config;
     const environment = $("environment");
-    environment.dataset.state = cfg.demo ? "demo" : cfg.antig && cfg.devin ? "connected" : "partial";
+    environment.dataset.state = cfg.demo ? "demo" : cfg.grok && cfg.devin ? "connected" : "partial";
     environment.textContent = cfg.demo ? "Демо · без вызовов агентов" :
       "Grok: " + (cfg.grok ? "ключ задан" : "нет ключа") + " · Devin: " + (cfg.devin ? "ключ задан" : "нет ключа");
     if (form) {
@@ -627,4 +627,5 @@ if (form) {
   }
   void loadTaskSkills();
 }
+if ($("settings-form")) document.addEventListener("bridge-settings-updated", () => void init());
 void init();

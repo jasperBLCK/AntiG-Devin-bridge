@@ -227,7 +227,8 @@ class AntiG:
 class Devin:
     def __init__(self, key: str, org: str) -> None:
         self.key = key
-        self.base = f"https://api.devin.ai/v3/organizations/{identifier(org)}/sessions"
+        self.org = identifier(org)
+        self.base = f"https://api.devin.ai/v3/organizations/{self.org}/sessions"
 
     def upload(self, name: str, content: bytes, mime: str) -> str:
         boundary = "----bridge-" + uuid4().hex

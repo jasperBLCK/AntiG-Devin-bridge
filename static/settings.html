@@ -35,7 +35,7 @@
   </header>
   <main id="main">
     <header class="page-heading">
-      <div><h1>Настройки</h1><p>Ключи Grok хранятся только на сервере. Панель показывает их статус, но не значения.</p></div>
+      <div><h1>Настройки</h1><p>Ключи Grok и Devin хранятся только на сервере. Панель показывает их статус, но не значения.</p></div>
     </header>
     <noscript>Включи JavaScript, чтобы изменить настройки.</noscript>
     <div class="settings-layout">
@@ -73,6 +73,29 @@
           </div>
           <p id="settings-note" class="muted" role="status"></p>
           <p id="settings-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+      <section class="panel settings-card" aria-labelledby="devin-title">
+        <div class="panel-header">
+          <h2 id="devin-title"><svg aria-hidden="true"><use href="/static/workspace-icons.svg#lock"/></svg>Devin API</h2>
+          <span class="status" id="key-devin">—</span>
+        </div>
+        <form id="devin-settings-form">
+          <label for="devin-org">ID организации Devin</label>
+          <input id="devin-org" type="text" autocomplete="off" spellcheck="false" maxlength="128"
+                 placeholder="org-…" required disabled aria-describedby="devin-org-help">
+          <p class="muted" id="devin-org-help">Скопируй Organization ID вверху страницы Settings → Devin API в Devin.</p>
+          <label for="devin-key">Ключ Devin API</label>
+          <input id="devin-key" type="password" autocomplete="off" spellcheck="false" maxlength="512"
+                 placeholder="cog_…" required disabled>
+          <p class="muted">Подойдёт ключ сервисного пользователя или PAT с доступом к сессиям этой организации.
+            Ключ действует до перезапуска сервера.</p>
+          <div class="form-actions">
+            <button type="submit" id="save-devin" class="primary" disabled>Сохранить</button>
+            <button type="button" id="reset-devin" class="quiet" disabled>Сбросить введённый ключ</button>
+          </div>
+          <p id="devin-settings-note" class="muted" role="status"></p>
+          <p id="devin-settings-error" class="error" role="alert" hidden></p>
         </form>
       </section>
       <section class="panel settings-card" aria-labelledby="clear-title">
