@@ -11,6 +11,7 @@ const modes = {
 const labels = { sending: "Отправляется", running: "В работе", paused: "На паузе", done: "Готово", ended: "Завершено", failed: "Ошибка" };
 const defaults = { image: "grok-imagine-image-2.0", video: "grok-imagine-video-1.5" };
 const state = { config: null, jobs: [], selected: null, source: null, busy: false, refreshing: false };
+const project = { tree: null, selected: new Set(), context: null, version: 0 };
 
 async function api(path, payload) {
   const init = payload === undefined ? {} : {
@@ -48,8 +49,11 @@ function setMode() {
   const mode = form.elements.mode.value;
   const metadata = modes[mode];
   const usesModel = mode === "image" || mode === "video";
+  $("project-fields").hidden = usesModel;
+  $("repo").disabled = $("git-ref").disabled = usesModel;
+  $("repo-browser").hidden = mode !== "grok";
   $("devin-fields").hidden = mode !== "devin";
-  $("repo").disabled = $("max-acu").disabled = mode !== "devin";
+  $("max-acu").disabled = mode !== "devin";
   $("model-field").hidden = !usesModel;
   $("model").disabled = !usesModel;
   if (usesModel) {
@@ -74,6 +78,108 @@ function setMode() {
   $("form-hint").textContent = !state.config ? "Загрузка…" : !enabled ? "Нет ключа API" :
     mode === "grok" ? "grok-4.7" : mode === "devin" ? "API v3" : "AntiG Imagine";
 }
+
+function resetContext() {
+  project.context = null;
+  $("share-context").checked = false;
+  $("context-confirm").hidden = true;
+  $("context-preview").textContent = "";
+}
+
+function resetProject() {
+  project.version += 1;
+  project.tree = null;
+  project.selected.clear();
+  resetContext();
+  $("repo-tree").hidden = true;
+  $("file-filter").value = "";
+  $("file-list").replaceChildren();
+  message("repo-error", "");
+  $("repo-hint").textContent = "Необязательно. Выбранный код можно проверить перед отправкой.";
+}
+
+function displayFiles() {
+  const query = $("file-filter").value.toLowerCase().trim();
+  const shown = project.tree.paths.filter((path) => path.toLowerCase().includes(query));
+  const rows = shown.map((path) => {
+    const item = element("label");
+    const checkbox = element("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = project.selected.has(path);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked && project.selected.size >= 6) {
+        checkbox.checked = false;
+        message("repo-error", "Можно выбрать до шести файлов.");
+        return;
+      }
+      if (checkbox.checked) project.selected.add(path);
+      else project.selected.delete(path);
+      project.version += 1;
+      resetContext();
+      message("repo-error", "");
+      displayFileCount();
+    });
+    item.append(checkbox, element("span", path));
+    return item;
+  });
+  $("file-list").replaceChildren(...(rows.length ? rows : [element("span", "Нет подходящих файлов.")]));
+  displayFileCount();
+}
+
+function displayFileCount() {
+  $("file-count").textContent = project.selected.size + " / 6";
+  $("preview-files").disabled = !project.selected.size;
+}
+
+$("repo").addEventListener("input", resetProject);
+$("git-ref").addEventListener("input", resetProject);
+$("file-filter").addEventListener("input", displayFiles);
+$("load-tree").addEventListener("click", async () => {
+  const repo = $("repo").value.trim();
+  const ref = $("git-ref").value.trim();
+  resetProject();
+  if (!repo || !$("repo").reportValidity()) {
+    message("repo-error", "Укажи репозиторий в формате владелец/репозиторий.");
+    return;
+  }
+  const version = project.version;
+  $("load-tree").disabled = true;
+  try {
+    const tree = await api("/api/repo/tree", { repo, ref: ref || null });
+    if (version !== project.version) return;
+    project.tree = tree;
+    $("git-ref").value = tree.ref;
+    $("repo").value = tree.repo;
+    $("repo-hint").textContent = (state.config?.demo ? "Демо: " : "") +
+      tree.ref + " @ " + tree.commit.slice(0, 8) + (tree.truncated ? " · список неполный" : "");
+    $("repo-tree").hidden = false;
+    displayFiles();
+  } catch (error) {
+    if (version === project.version) message("repo-error", error.message);
+  } finally {
+    $("load-tree").disabled = false;
+  }
+});
+
+$("preview-files").addEventListener("click", async () => {
+  if (!project.tree || !project.selected.size) return;
+  resetContext();
+  message("repo-error", "");
+  const version = project.version;
+  const { repo, ref, commit } = project.tree;
+  $("preview-files").disabled = true;
+  try {
+    const context = await api("/api/repo/preview", { repo, ref, commit, paths: [...project.selected] });
+    if (version !== project.version) return;
+    project.context = context;
+    $("context-preview").textContent = context.files.map((file) => "=== " + file.path + " ===\n" + file.text).join("\n\n");
+    $("context-confirm").hidden = false;
+  } catch (error) {
+    if (version === project.version) message("repo-error", error.message);
+  } finally {
+    displayFileCount();
+  }
+});
 
 function showHistory() {
   $("history-count").textContent = String(state.jobs.length);
@@ -132,6 +238,9 @@ function showResult() {
   status.textContent = statusText(job);
   status.dataset.status = job.status;
   root.replaceChildren(element("h3", modes[job.mode].title + (job.model ? " · " + job.model : "")));
+  if (job.repo) {
+    root.append(element("p", [job.repo, job.ref, job.commit_sha?.slice(0, 8)].filter(Boolean).join(" · "), "mono muted"));
+  }
   root.append(element("p", job.prompt, "muted"));
   if (job.error) root.append(element("p", job.error, "error"));
   if (job.result) root.append(element("pre", job.result));
@@ -153,6 +262,11 @@ function showResult() {
     action.type = "button";
     action.addEventListener("click", () => {
       state.source = job.id;
+      resetProject();
+      if (job.repo) {
+        $("repo").value = job.repo;
+        $("git-ref").value = job.ref || "";
+      }
       form.querySelector('[value="devin"]').checked = true;
       $("prompt").value = job.prompt;
       setMode();
@@ -225,9 +339,20 @@ form.addEventListener("submit", async (event) => {
     message("form-error", "Введи задачу.");
     return;
   }
-  if (mode === "devin") {
+  if (mode === "grok" || mode === "devin") {
     const repo = $("repo").value.trim();
+    const ref = $("git-ref").value.trim();
     if (repo) payload.repo = repo;
+    if (ref) payload.ref = ref;
+    if (mode === "grok" && repo) {
+      if (!project.context || !$("share-context").checked) {
+        message("form-error", "Выбери файлы, проверь код и подтверди отправку в AntiG.");
+        return;
+      }
+      payload.context = project.context;
+    }
+  }
+  if (mode === "devin") {
     payload.max_acu = Number($("max-acu").value);
     if (state.source) payload.source_id = state.source;
   } else if (mode !== "grok") {

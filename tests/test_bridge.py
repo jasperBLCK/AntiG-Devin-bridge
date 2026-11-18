@@ -138,3 +138,51 @@ class BridgeTests(unittest.TestCase):
             b'data: [DONE]\n\n'
         )
         self.assertEqual(collect_chat_stream(stream)["choices"][0]["message"]["content"], "First step.")
+
+    def test_context_uses_pinned_files_and_handoff_keeps_repository(self):
+        commit, tree_sha = "a" * 40, "b" * 40
+        with (self.client(live=True) as client, patch("repository.request_json") as github,
+              patch("providers.request_json") as request):
+            github.side_effect = [
+                {"default_branch": "release"},
+                {"sha": commit, "commit": {"tree": {"sha": tree_sha}}},
+                {"tree": [
+                    {"path": "README.md", "type": "blob", "mode": "100644", "size": 5},
+                    {"path": ".env", "type": "blob", "mode": "100644", "size": 100},
+                    {"path": "link", "type": "blob", "mode": "120000", "size": 100},
+                ]},
+                {"type": "file", "encoding": "base64", "size": 5, "content": "aGVsbG8="},
+            ]
+            body = {"repo": "test/repo"}
+            tree = client.post("/api/repo/tree", json=body, headers=WRITE).json()
+            self.assertEqual(tree["paths"], ["README.md"])
+            self.assertEqual(tree["ref"], "release")
+            selection = {**body, "ref": "release", "commit": commit}
+            excluded = client.post("/api/repo/preview", json={**selection, "paths": [".env"]}, headers=WRITE)
+            self.assertEqual(excluded.status_code, 422)
+            preview = client.post("/api/repo/preview", json={**selection, "paths": ["README.md"]}, headers=WRITE)
+            self.assertEqual(preview.status_code, 200)
+            self.assertTrue(github.call_args.args[0].endswith(f"/contents/README.md?ref={commit}"))
+            request.assert_not_called()
+
+            request.side_effect = [
+                {"choices": [{"message": {"content": "Read the README."}}]},
+                {"session_id": "devin-session", "status": "new", "pull_requests": []},
+            ]
+            plan = self.submit(client, mode="grok", prompt="Plan this", **body,
+                               ref="release", context=preview.json())
+            self.assertEqual(plan.status_code, 202)
+            prompt = request.call_args.args[2]["messages"][-1]["content"]
+            for text in ("hello", "README.md", commit):
+                self.assertIn(text, prompt)
+            self.assertNotIn("hello", str(self.get(client, plan)))
+            changed = self.submit(client, mode="devin", repo="test/different", prompt="Implement",
+                                  source_id=plan.json()["id"])
+            self.assertEqual(changed.status_code, 422)
+            run = self.submit(client, mode="devin", prompt="Implement", source_id=plan.json()["id"])
+            self.assertEqual(run.status_code, 202)
+            payload = request.call_args.args[2]
+            self.assertEqual(payload["repos"], ["test/repo"])
+            self.assertIn("release", payload["prompt"])
+            self.assertIn(commit, payload["prompt"])
+            self.assertNotIn("hello", payload["prompt"])

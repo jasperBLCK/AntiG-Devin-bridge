@@ -43,8 +43,11 @@ def collect_chat_stream(raw: bytes) -> dict[str, Any]:
 
 
 def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
-                 stream_model: str = "") -> dict[str, Any]:
-    req = Request(url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+                 stream_model: str = "", headers: dict[str, str] | None = None) -> dict[str, Any]:
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    if key:
+        request_headers["Authorization"] = f"Bearer {key}"
+    req = Request(url, headers=request_headers)
     if stream_model:
         req.add_header("Accept", "text/event-stream, application/json")
         req.add_header("x-grok-model-override", stream_model)
@@ -59,6 +62,8 @@ def request_json(url: str, key: str, payload: dict[str, Any] | None = None, *,
             raise ProviderError("Ответ сервиса превысил лимит размера.")
         data = collect_chat_stream(raw) if stream_model and event_stream else json.loads(raw)
     except HTTPError as exc:
+        if exc.code == 403 and exc.headers.get("X-RateLimit-Remaining") == "0":
+            raise ProviderError("Лимит API исчерпан. Для GitHub можно задать GITHUB_READ_TOKEN.") from None
         messages = {
             401: "Сервис не принял API-ключ.",
             402: "Сервис сообщает о проблеме с квотой или оплатой.",

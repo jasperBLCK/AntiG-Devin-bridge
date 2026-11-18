@@ -47,9 +47,30 @@
           </div>
           <label for="prompt" id="prompt-label">Что нужно разработать?</label>
           <textarea name="prompt" id="prompt" rows="5" maxlength="12000" required placeholder="Например: продумай импорт CSV с проверкой ошибок"></textarea>
+          <div id="project-fields" class="project-fields">
+            <div class="project-inputs">
+              <div><label for="repo">Репозиторий GitHub</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
+              <div><label for="git-ref">Ветка или тег</label><input id="git-ref" name="git-ref" placeholder="По умолчанию" maxlength="200"></div>
+            </div>
+            <div id="repo-browser" class="repo-browser">
+              <button id="load-tree" type="button" class="quiet">Выбрать файлы</button>
+              <span id="repo-hint" class="muted">Необязательно. Выбранный код можно проверить перед отправкой.</span>
+              <div id="repo-tree" hidden>
+                <label for="file-filter">Найти файл</label>
+                <input id="file-filter" type="search" placeholder="Например: README или src/">
+                <div id="file-list" aria-label="Файлы репозитория" class="file-list"></div>
+                <button id="preview-files" type="button" class="quiet" disabled>Посмотреть выбранный код</button>
+                <span id="file-count" class="mono muted"></span>
+              </div>
+              <p id="repo-error" class="error" role="alert" hidden></p>
+              <div id="context-confirm" hidden>
+                <pre id="context-preview" tabindex="0"></pre>
+                <label class="confirmation"><input id="share-context" type="checkbox"> Отправить этот код в AntiG вместе с задачей</label>
+              </div>
+            </div>
+          </div>
           <div id="devin-fields" class="devin-fields" hidden>
-            <div><label for="repo">Репозиторий (необязательно)</label><input id="repo" name="repo" placeholder="владелец/репозиторий" maxlength="200" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"></div>
-            <div><label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required></div>
+            <label for="max-acu">Лимит, ACU</label><input id="max-acu" name="max-acu" type="number" min="1" max="100" value="5" required>
           </div>
           <div id="model-field" hidden><label for="model">Модель</label><select name="model" id="model"></select></div>
           <div class="form-actions">
